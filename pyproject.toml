@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keystroke2tei"
+version = "0.1.0"
+description = "Convert Inputlog keystroke CSV logs to TEI XML genetic editions"
+requires-python = ">=3.12"
+dependencies = [
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+keystroke2tei = "keystroke2tei.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["keystroke2tei*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
