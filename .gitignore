@@ -3,7 +3,10 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
-data/input/
-data/output/
-data/corpora/
+data/input/*
+!data/input/.gitkeep
+data/output/*
+!data/output/.gitkeep
+data/corpora/*
+!data/corpora/.gitkeep
 .DS_Store
