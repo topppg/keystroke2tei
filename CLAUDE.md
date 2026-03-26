@@ -48,7 +48,8 @@ uv run keystroke2tei data/corpora/ -o data/output/          # test against 31 co
 - No docstrings unless logic is non-obvious
 - `uv` for package management
 - Tests via pytest, all in `tests/test_converter.py`
-- One-line commit messages, conventional commits format
+- One-line commit messages, conventional commits format (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`)
+- Always push after committing: `git push`
 
 ## Known sensitive areas
 
