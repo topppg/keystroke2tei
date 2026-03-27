@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from keystroke2tei.converter import CharMap, _classify_key, _process_events, _group_into_episodes, convert
-from keystroke2tei.models import Event, EventType
+from keystroke2tei.converter import CharMap, WritingAction, _classify_key, _process_events, _group_into_episodes, convert, _build_tei_tree
+from keystroke2tei.models import Event, EventType, NodeKind
 
 
 def _kb(event_id: int, output: str, position: int, doclength: int, start_time: int = 0) -> Event:
@@ -111,7 +111,7 @@ class TestClassifyKey:
         assert _classify_key("SPACE") == " "
         assert _classify_key("BACK") == "BACK"
         assert _classify_key("DELETE") == "DELETE"
-        assert _classify_key("RETURN") == "\n"
+        assert _classify_key("RETURN") == "RETURN"
         assert _classify_key("TAB") == "\t"
 
     def test_nav_keys(self):
@@ -121,14 +121,15 @@ class TestClassifyKey:
         assert _classify_key("END") == "NAV"
 
     def test_modifier(self):
-        assert _classify_key("LCTRL + C") == "MODIFIER"
+        assert _classify_key("LCTRL + C") == "CTRL+C"
         assert _classify_key("RSHIFT + A") == "MODIFIER"
+        assert _classify_key("LCTRL + Z") == "MODIFIER"
 
     def test_unknown(self):
         assert _classify_key("CAPSLOCK") == "UNKNOWN"
 
     def test_aliases(self):
-        assert _classify_key("ENTER") == "\n"
+        assert _classify_key("ENTER") == "RETURN"
         assert _classify_key("BACKSPACE") == "BACK"
         assert _classify_key("DEL") == "DELETE"
         assert _classify_key("SPACEBAR") == " "
@@ -139,6 +140,17 @@ class TestClassifyKey:
     def test_multi_char(self):
         assert _classify_key("你好") == "你好"
         assert _classify_key("œ") == "œ"
+
+    def test_caps_lock_with_space(self):
+        assert _classify_key("CAPS LOCK") == "UNKNOWN"
+
+    def test_bare_modifiers(self):
+        assert _classify_key("LCTRL") == "UNKNOWN"
+        assert _classify_key("RCTRL") == "UNKNOWN"
+        assert _classify_key("LALT") == "UNKNOWN"
+        assert _classify_key("RALT") == "UNKNOWN"
+        assert _classify_key("LSHIFT") == "UNKNOWN"
+        assert _classify_key("RSHIFT") == "UNKNOWN"
 
 
 # --- _process_events ---
@@ -240,6 +252,265 @@ class TestProcessEvents:
         actions, text, diags = _process_events(events)
         assert text == ""
         assert actions[-1].kind == "delete"
+
+    def test_return_produces_linebreak_action(self):
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "RETURN", position=1, doclength=1, start_time=200),
+            _kb(3, "b", position=2, doclength=2, start_time=300),
+        ]
+        actions, text, diags = _process_events(events)
+        assert text == "a\nb"
+        assert actions[1].kind == "linebreak"
+
+    def test_bare_modifier_skipped(self):
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "LSHIFT", position=1, doclength=1, start_time=200),
+            _kb(3, "b", position=1, doclength=1, start_time=300),
+        ]
+        actions, text, diags = _process_events(events)
+        assert len(actions) == 2
+        assert text == "ab"
+
+
+# --- Line break in TEI ---
+
+class TestLineBreak:
+    def test_lb_in_tei_output(self):
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "RETURN", position=1, doclength=1, start_time=200),
+            _kb(3, "b", position=2, doclength=2, start_time=300),
+        ]
+        actions, _, _ = _process_events(events)
+        episodes = _group_into_episodes(actions)
+        seg = _build_tei_tree(episodes)
+        # Should have an <add> with text "a", <lb/>, text "b"
+        assert len(seg.children) >= 1
+        add_node = seg.children[0]
+        lb_nodes = [c for c in add_node.children if c.kind == NodeKind.LB]
+        assert len(lb_nodes) == 1
+
+    def test_lb_serializes_to_xml(self):
+        from keystroke2tei.writer import write_tei
+        events = [
+            _kb(1, "h", position=0, doclength=0, start_time=100),
+            _kb(2, "i", position=1, doclength=1, start_time=200),
+            _kb(3, "RETURN", position=2, doclength=2, start_time=300),
+            _kb(4, "x", position=3, doclength=3, start_time=400),
+        ]
+        result = convert(events)
+        xml = write_tei(result.segments)
+        assert "<lb/>" in xml
+
+    def test_linebreak_no_episode_split(self):
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "RETURN", position=1, doclength=1, start_time=200),
+            _kb(3, "b", position=2, doclength=2, start_time=300),
+        ]
+        actions, _, _ = _process_events(events)
+        episodes = _group_into_episodes(actions)
+        # linebreak should not split the episode
+        assert len(episodes) == 1
+
+
+# --- Empty seg filtering ---
+
+class TestEmptySegFiltering:
+    def test_empty_seg_filtered(self):
+        events = [
+            _mouse(1, "LEFT Click", position=0, doclength=0, start_time=100),
+        ]
+        result = convert(events)
+        assert len(result.segments) == 0
+
+
+# --- Pipe types (nt|continue) ---
+
+class TestPipeContinue:
+    def test_nt_continue_after_inline_typo(self):
+        # Type "abc", backspace (typo correction), then type "de"
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "b", position=1, doclength=1, start_time=200),
+            _kb(3, "c", position=2, doclength=2, start_time=300),
+            _kb(4, "BACK", position=3, doclength=3, start_time=400),
+            _kb(5, "d", position=2, doclength=2, start_time=500),
+            _kb(6, "e", position=3, doclength=3, start_time=600),
+        ]
+        actions, _, _ = _process_events(events)
+        episodes = _group_into_episodes(actions)
+        seg = _build_tei_tree(episodes)
+
+        # Should have: <add type="nt">abc<del type="typo">c</del></add>
+        #              <add type="nt|continue">de</add>
+        add_nodes = [c for c in seg.children if c.kind == NodeKind.ADD]
+        assert len(add_nodes) == 2
+        continue_node = add_nodes[1]
+        assert continue_node.revision_type == "nt|continue"
+
+    def test_nt_continue_in_xml(self):
+        from keystroke2tei.writer import write_tei
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "b", position=1, doclength=1, start_time=200),
+            _kb(3, "BACK", position=2, doclength=2, start_time=300),
+            _kb(4, "c", position=1, doclength=1, start_time=400),
+        ]
+        result = convert(events)
+        xml = write_tei(result.segments)
+        assert 'type="nt|continue"' in xml
+
+
+# --- Translocation (cut/paste) ---
+
+class TestTranslocation:
+    def test_ctrl_x_classified(self):
+        assert _classify_key("LCTRL + X") == "CTRL+X"
+        assert _classify_key("RCTRL + C") == "CTRL+C"
+        assert _classify_key("LCTRL + V") == "CTRL+V"
+
+    def test_cut_paste_translocation(self):
+        from keystroke2tei.writer import write_tei
+        # Type "abc", select+cut "b", move to end, paste
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "b", position=1, doclength=1, start_time=200),
+            _kb(3, "c", position=2, doclength=2, start_time=300),
+            # Select "b" (pos 1) and cut — doclength drops from 3 to 2
+            _kb(4, "LCTRL + X", position=1, doclength=3, start_time=400),
+            # Move to end and paste
+            _mouse(5, "LEFT Click", position=2, doclength=2, start_time=500),
+            _kb(6, "LCTRL + V", position=2, doclength=2, start_time=600),
+        ]
+        result = convert(events)
+        xml = write_tei(result.segments)
+        assert 'type="translocation"' in xml
+
+    def test_ga_format_ctrl_combo(self):
+        # GA format: bare LCTRL event followed by "c" event
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _kb(2, "LCTRL", position=1, doclength=1, start_time=200),
+            _kb(3, "c", position=1, doclength=1, start_time=300),
+        ]
+        actions, _, _ = _process_events(events)
+        # LCTRL + c → copy, no action emitted (just clipboard)
+        assert len(actions) == 1  # only the initial insert
+
+
+# --- pre-context fix ---
+
+class TestPreContext:
+    def test_precontext_insert_after_click_back(self):
+        from keystroke2tei.converter import _classify_revision_type, RevisionEpisode
+        # Simulate: cursor moved back, insertion only (no delete)
+        ep = RevisionEpisode(is_revision=True, cursor_moved_back=True)
+        ep.actions.append(WritingAction(kind="insert", position=5, text="x", timestamp=100))
+        assert _classify_revision_type(ep) == "pre-context"
+
+    def test_context_delete_after_click_back(self):
+        from keystroke2tei.converter import _classify_revision_type, RevisionEpisode, WritingAction
+        # Simulate: cursor moved back, has delete → context
+        ep = RevisionEpisode(is_revision=True, cursor_moved_back=True)
+        ep.actions.append(WritingAction(kind="delete", position=5, deleted_text="x", timestamp=100))
+        assert _classify_revision_type(ep) == "context"
+
+    def test_precontext_e2e(self):
+        from keystroke2tei.writer import write_tei
+        # Type "hello", click to pos 2, type "X" (no delete)
+        events = [
+            _kb(1, "h", position=0, doclength=0, start_time=100),
+            _kb(2, "e", position=1, doclength=1, start_time=200),
+            _kb(3, "l", position=2, doclength=2, start_time=300),
+            _kb(4, "l", position=3, doclength=3, start_time=400),
+            _kb(5, "o", position=4, doclength=4, start_time=500),
+            _mouse(6, "LEFT Click", position=2, doclength=5, start_time=600),
+            _kb(7, "X", position=2, doclength=5, start_time=700),
+        ]
+        result = convert(events)
+        xml = write_tei(result.segments)
+        assert 'type="pre-context"' in xml
+
+
+# --- mod type="continue" ---
+
+class TestModContinue:
+    def test_return_to_leading_edge(self):
+        # Type "hello" → click at pos 1 → delete "e" → click back to pos 4 → type " world"
+        events = [
+            _kb(1, "h", position=0, doclength=0, start_time=100),
+            _kb(2, "e", position=1, doclength=1, start_time=200),
+            _kb(3, "l", position=2, doclength=2, start_time=300),
+            _kb(4, "l", position=3, doclength=3, start_time=400),
+            _kb(5, "o", position=4, doclength=4, start_time=500),
+            # Click to pos 1 (before "e") — away from leading edge (5)
+            _mouse(6, "LEFT Click", position=1, doclength=5, start_time=600),
+            # Delete "e"
+            _kb(7, "DELETE", position=1, doclength=5, start_time=700),
+            # Click back to pos 4 (near leading edge)
+            _mouse(8, "LEFT Click", position=4, doclength=4, start_time=800),
+            # Resume typing
+            _kb(9, "SPACE", position=4, doclength=4, start_time=900),
+            _kb(10, "w", position=5, doclength=5, start_time=1000),
+        ]
+        actions, _, _ = _process_events(events)
+        episodes = _group_into_episodes(actions)
+        seg = _build_tei_tree(episodes)
+        mod_nodes = [c for c in seg.children if c.kind == NodeKind.MOD]
+        assert len(mod_nodes) == 1
+        assert mod_nodes[0].revision_type == "continue"
+
+
+# --- Focus events + source ---
+
+def _focus(event_id: int, output: str, position: int, doclength: int, start_time: int = 0) -> Event:
+    return Event(
+        event_type=EventType.FOCUS, event_id=event_id, output=output,
+        char_production=0, action_time=0, start_time=start_time, end_time=start_time,
+        pause_location=0, pause_location_full="", pause_time=0,
+        position=position, doclength=doclength,
+    )
+
+
+class TestFocusSource:
+    def test_focus_creates_action(self):
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _focus(2, "Chrome", position=1, doclength=1, start_time=200),
+        ]
+        actions, _, _ = _process_events(events)
+        focus_actions = [a for a in actions if a.kind == "focus"]
+        assert len(focus_actions) == 1
+        assert focus_actions[0].text == "Chrome"
+
+    def test_source_paste_detection(self):
+        from keystroke2tei.writer import write_tei
+        # Type "a", focus out to Chrome, focus back, paste "xyz"
+        events = [
+            _kb(1, "a", position=0, doclength=0, start_time=100),
+            _focus(2, "Chrome", position=1, doclength=1, start_time=200),
+            _focus(3, "Word", position=1, doclength=1, start_time=300),
+            _kb(4, "LCTRL + V", position=1, doclength=1, start_time=400),
+            # Next event to resolve paste — doclength increased by 3
+            _kb(5, "b", position=4, doclength=4, start_time=500),
+        ]
+        result = convert(events)
+        xml = write_tei(result.segments, focus_sources=result.focus_sources)
+        assert 'type="source"' in xml
+
+    def test_focus_sources_in_xml(self):
+        from keystroke2tei.writer import write_tei
+        events = [
+            _focus(1, "Chrome", position=0, doclength=0, start_time=100),
+        ]
+        result = convert(events)
+        xml = write_tei(result.segments, focus_sources=result.focus_sources)
+        assert 'source="sources"' in xml
+        assert "<desc>Chrome</desc>" in xml
+        assert "<media>" in xml
 
 
 # --- Episode grouping ---

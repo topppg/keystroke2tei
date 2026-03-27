@@ -52,6 +52,9 @@ class NodeKind(Enum):
     MOD = "mod"
     SEG = "seg"
     TEXT = "text"
+    LB = "lb"
+    MEDIA = "media"
+    DESC = "desc"
 
 
 @dataclass

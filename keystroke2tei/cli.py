@@ -59,7 +59,7 @@ def _process_single(
         else:
             events, metadata, parse_warnings = parse_csv(csv_path)
         result = convert(events, metadata=metadata, parse_warnings=len(parse_warnings))
-        xml = write_tei(result.segments, metadata=metadata)
+        xml = write_tei(result.segments, metadata=metadata, focus_sources=result.focus_sources)
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(xml, encoding="utf-8")

@@ -9,7 +9,8 @@ from keystroke2tei.models import ConversionStats, Diagnostic, Event, EventType, 
 SPECIAL_KEYS = {"SPACE", "BACK", "DELETE", "RETURN", "TAB"}
 NAV_KEYS = {"LEFT", "RIGHT", "UP", "DOWN", "HOME", "END", "PAGEUP", "PAGEDOWN"}
 IGNORED_KEYS = {"CAPSLOCK", "NUMLOCK", "SCROLL", "INSERT", "ESCAPE", "PRINT", "PAUSE",
-                "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"}
+                "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+                "LCTRL", "RCTRL", "LALT", "RALT", "LSHIFT", "RSHIFT"}
 MODIFIER_PATTERN = re.compile(r"^(LCTRL|RCTRL|LALT|RALT|LSHIFT|RSHIFT)\s*\+")
 REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\]\s*(.*)")
 
@@ -108,9 +109,13 @@ class RevisionEpisode:
     def net_text(self) -> str:
         parts: list[str] = []
         for a in self.actions:
-            if a.kind == "insert":
+            if a.kind in ("insert", "linebreak", "paste"):
                 parts.append(a.text)
         return "".join(parts)
+
+    @property
+    def has_linebreak(self) -> bool:
+        return any(a.kind == "linebreak" for a in self.actions)
 
     @property
     def deleted_text(self) -> str:
@@ -127,7 +132,8 @@ class RevisionEpisode:
 
 
 def _classify_key(output: str) -> str:
-    normalized = KEY_ALIASES.get(output, output)
+    stripped = output.replace(" ", "")
+    normalized = KEY_ALIASES.get(stripped, KEY_ALIASES.get(output, stripped))
     if normalized == "SPACE":
         return " "
     if normalized == "BACK":
@@ -135,14 +141,18 @@ def _classify_key(output: str) -> str:
     if normalized == "DELETE":
         return "DELETE"
     if normalized == "RETURN":
-        return "\n"
+        return "RETURN"
     if normalized == "TAB":
         return "\t"
     if normalized in NAV_KEYS:
         return "NAV"
     if normalized in IGNORED_KEYS:
         return "UNKNOWN"
-    if MODIFIER_PATTERN.match(output):
+    m = MODIFIER_PATTERN.match(output)
+    if m:
+        rest = output[m.end():].strip()
+        if rest.upper() in ("X", "C", "V"):
+            return f"CTRL+{rest.upper()}"
         return "MODIFIER"
     if len(output) == 1:
         return output
@@ -157,10 +167,62 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
     actions: list[WritingAction] = []
     diagnostics: list[Diagnostic] = []
     prev_cursor = 0
+    pending_modifier: str | None = None
+    clipboard: str = ""
+    pending_clipboard_op: str | None = None
+    pending_clipboard_ev: Event | None = None
+    pending_clipboard_cursor: int = 0
+    focus_source: str = ""
 
     for ev in events:
         if ev.event_type == EventType.FOCUS:
+            actions.append(WritingAction(
+                kind="focus", position=ev.position, text=ev.output,
+                event=ev, timestamp=ev.start_time,
+            ))
+            focus_source = ev.output
             continue
+
+        # Resolve pending cut/copy/paste using this event's doclength (before drift padding)
+        if pending_clipboard_op is not None:
+            if pending_clipboard_op == "CTRL+X":
+                cut_len = max(0, cmap.length - ev.doclength)
+                cut_text = ""
+                for _ in range(cut_len):
+                    if pending_clipboard_cursor < cmap.length:
+                        ch = cmap.delete(pending_clipboard_cursor)
+                        cut_text += ch if ch else ""
+                clipboard = cut_text
+                if cut_text and pending_clipboard_ev:
+                    actions.append(WritingAction(
+                        kind="cut", position=pending_clipboard_cursor,
+                        deleted_text=cut_text, event=pending_clipboard_ev,
+                        timestamp=pending_clipboard_ev.start_time,
+                    ))
+            elif pending_clipboard_op == "CTRL+C":
+                # Infer copied text from selection (same length logic as cut but no delete)
+                # We can't determine copy content without selection info; best effort
+                pass
+            elif pending_clipboard_op == "CTRL+V":
+                paste_len = max(0, ev.doclength - cmap.length)
+                if paste_len > 0 and clipboard:
+                    paste_text = clipboard[:paste_len] if len(clipboard) >= paste_len else clipboard
+                elif paste_len > 0:
+                    paste_text = "?" * paste_len
+                elif clipboard:
+                    paste_text = clipboard
+                else:
+                    paste_text = ""
+                if paste_text and pending_clipboard_ev:
+                    for i, ch in enumerate(paste_text):
+                        cmap.insert(pending_clipboard_cursor + i, ch)
+                    actions.append(WritingAction(
+                        kind="paste", position=pending_clipboard_cursor,
+                        text=paste_text, event=pending_clipboard_ev,
+                        timestamp=pending_clipboard_ev.start_time,
+                    ))
+            pending_clipboard_op = None
+            pending_clipboard_ev = None
 
         # Pad map if CSV reports a larger document (autocomplete/spellcheck added chars)
         if ev.doclength > cmap.length:
@@ -203,6 +265,17 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
 
         if ev.event_type == EventType.KEYBOARD:
             key = _classify_key(ev.output)
+
+            # GA format: bare modifier followed by X/C/V
+            if key == "UNKNOWN" and ev.output.replace(" ", "") in ("LCTRL", "RCTRL"):
+                pending_modifier = "CTRL"
+                continue
+            if pending_modifier == "CTRL" and len(key) == 1 and key.upper() in ("X", "C", "V"):
+                key = f"CTRL+{key.upper()}"
+                pending_modifier = None
+            else:
+                pending_modifier = None
+
             if key in ("MODIFIER", "UNKNOWN", "NAV"):
                 continue
 
@@ -235,6 +308,16 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         kind="delete", position=cursor,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
                     ))
+            elif key == "RETURN":
+                cmap.insert(cursor, "\n")
+                actions.append(WritingAction(
+                    kind="linebreak", position=cursor, text="\n",
+                    event=ev, timestamp=ev.start_time,
+                ))
+            elif key in ("CTRL+X", "CTRL+C", "CTRL+V"):
+                pending_clipboard_op = key
+                pending_clipboard_ev = ev
+                pending_clipboard_cursor = cursor
             else:
                 for i, ch in enumerate(key):
                     cmap.insert(cursor + i, ch)
@@ -244,6 +327,16 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                 ))
 
             prev_cursor = ev.position
+
+    # Resolve any trailing clipboard op (last event was cut/copy/paste)
+    if pending_clipboard_op == "CTRL+V" and clipboard and pending_clipboard_ev:
+        for i, ch in enumerate(clipboard):
+            cmap.insert(pending_clipboard_cursor + i, ch)
+        actions.append(WritingAction(
+            kind="paste", position=pending_clipboard_cursor,
+            text=clipboard, event=pending_clipboard_ev,
+            timestamp=pending_clipboard_ev.start_time,
+        ))
 
     return actions, cmap.get_text(), diagnostics
 
@@ -259,16 +352,14 @@ def _classify_revision_type(episode: RevisionEpisode) -> str:
         return "context"
 
     if episode.cursor_moved_back:
-        # Cursor was relocated (mouse click) → context revision
-        return "context"
+        if has_delete:
+            return "context"
+        # Cursor relocated backward, insertion only → pre-context
+        return "pre-context"
 
     if has_delete:
         # Inline backspace without cursor relocation → typo
         return "typo"
-
-    # Insert at cursor-moved-back position
-    if episode.cursor_moved_back:
-        return "pre-context"
 
     return "nt"
 
@@ -286,6 +377,9 @@ def _group_into_episodes(
     current_kind = ""
 
     for action in actions:
+        if action.kind == "focus":
+            continue
+
         if action.kind == "move":
             if current.actions:
                 current.end_time = action.timestamp
@@ -297,18 +391,25 @@ def _group_into_episodes(
             current_kind = ""
             continue
 
-        if action.kind == "replace":
+        if action.kind in ("replace", "cut", "paste"):
             if current.actions:
                 current.end_time = action.timestamp
                 episodes.append(current)
             ep = RevisionEpisode(
-                start_time=action.timestamp, is_revision=True,
+                start_time=action.timestamp, is_revision=(action.kind != "paste"),
             )
             ep.actions.append(action)
             ep.end_time = action.timestamp
             episodes.append(ep)
             current = RevisionEpisode(start_time=action.timestamp)
             current_kind = ""
+            continue
+
+        # Linebreak is neutral — doesn't trigger insert↔delete split
+        if action.kind == "linebreak":
+            current.actions.append(action)
+            current.end_time = action.timestamp
+            last_insert_end = action.position + 1
             continue
 
         # Split at insert↔delete transitions
@@ -359,6 +460,23 @@ def _episode_pos_range(ep: RevisionEpisode) -> tuple[int, int]:
     return (start, end)
 
 
+def _append_episode_content(ep: RevisionEpisode, target: TEINode) -> None:
+    if not ep.has_linebreak:
+        target.append(TEINode(kind=NodeKind.TEXT, text=ep.net_text))
+        return
+    buf: list[str] = []
+    for a in ep.actions:
+        if a.kind == "linebreak":
+            if buf:
+                target.append(TEINode(kind=NodeKind.TEXT, text="".join(buf)))
+                buf.clear()
+            target.append(TEINode(kind=NodeKind.LB))
+        elif a.kind == "insert":
+            buf.append(a.text)
+    if buf:
+        target.append(TEINode(kind=NodeKind.TEXT, text="".join(buf)))
+
+
 def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
     root = TEINode(kind=NodeKind.SEG, start_pos=0, end_pos=999999)
 
@@ -385,60 +503,137 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
         )
 
     current_add: TEINode | None = None
+    current_add_parent: TEINode = root
+    current_add_type: str = "nt"
     prev_ep: RevisionEpisode | None = None
     had_move_since_last_add = False
+    interrupted_by_inline_typo = False
+    leading_edge_pos: int = 0
+    edited_away_from_edge = False
 
     for ep in episodes:
         rev_type = _classify_revision_type(ep)
         ep_start, ep_end = _episode_pos_range(ep)
 
         # Track whether a mouse click occurred between episodes
-        if prev_ep and any(a.kind == "move" for a in ep.actions):
+        if ep.cursor_moved_back:
             had_move_since_last_add = True
 
         follows_revision = prev_ep is not None and prev_ep.is_revision
 
-        if not ep.is_revision:
+        # Check for cut/paste episodes
+        has_cut = any(a.kind == "cut" for a in ep.actions)
+        has_paste = any(a.kind == "paste" for a in ep.actions)
+        is_source_paste = has_paste and any(a.kind == "paste" and a.deleted_text == "source" for a in ep.actions)
+
+        # Reclassify: a "revision" episode with only inserts near the leading edge
+        # is actually a return to leading edge, not a real revision
+        has_only_inserts = all(a.kind in ("insert", "linebreak") for a in ep.actions)
+        is_at_leading_edge = has_only_inserts and abs(ep_start - leading_edge_pos) <= 2
+        treat_as_forward = (not ep.is_revision or has_paste or
+                           (ep.is_revision and is_at_leading_edge and edited_away_from_edge))
+
+        if treat_as_forward:
             text = ep.net_text
             if not text:
                 prev_ep = ep
                 continue
 
-            if current_add is not None and ep_start >= current_add.start_pos and ep_start <= current_add.end_pos + 1:
-                # Continuation within current parent — append as plain text
-                current_add.append(TEINode(kind=NodeKind.TEXT, text=text))
-                current_add.end_pos = max(current_add.end_pos, ep_start + len(text))
-            elif follows_revision and current_add is not None:
-                if had_move_since_last_add:
-                    # Return after editing elsewhere → <add type="context">
-                    current_add.append(_make_node(
-                        NodeKind.ADD, text, "context", ep,
-                        start=ep_start, end=ep_start + len(text),
-                    ))
-                else:
-                    # Resume after inline correction → plain text (nt|continue)
-                    current_add.append(TEINode(kind=NodeKind.TEXT, text=text))
-                current_add.end_pos = max(current_add.end_pos, ep_start + len(text))
-            else:
-                # New typing burst — create a new parent <add>
+            if has_paste:
+                # Paste always gets its own node (translocation or source)
+                effective_type = "source" if is_source_paste else "translocation"
                 node = _make_node(
-                    NodeKind.ADD, text, rev_type, ep,
+                    NodeKind.ADD, "", effective_type, ep,
                     start=ep_start, end=ep_start + len(text),
                 )
+                _append_episode_content(ep, node)
                 parent = _find_parent_node(root, ep_start, ep_start + len(text))
                 parent.append(node)
                 current_add = node
+                current_add_parent = parent
+                current_add_type = effective_type
                 had_move_since_last_add = False
+                interrupted_by_inline_typo = False
+                leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
+            elif follows_revision and current_add is not None and not had_move_since_last_add and interrupted_by_inline_typo:
+                # Resume after inline correction → sibling <add type="...|continue">
+                continue_type = f"{current_add_type}|continue"
+                node = _make_node(
+                    NodeKind.ADD, "", continue_type, ep,
+                    start=ep_start, end=ep_start + len(text),
+                )
+                _append_episode_content(ep, node)
+                current_add_parent.append(node)
+                current_add = node
+                current_add_type = continue_type
+                interrupted_by_inline_typo = False
+                leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
+            elif edited_away_from_edge and had_move_since_last_add and abs(ep_start - leading_edge_pos) <= 2:
+                # Return to leading edge after editing elsewhere → <mod type="continue">
+                node = _make_node(
+                    NodeKind.MOD, "", "continue", ep,
+                    start=ep_start, end=ep_start + len(text),
+                )
+                _append_episode_content(ep, node)
+                root.append(node)
+                current_add = node
+                current_add_parent = root
+                current_add_type = "continue"
+                had_move_since_last_add = False
+                edited_away_from_edge = False
+                leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
+            elif current_add is not None and ep_start >= current_add.start_pos and ep_start <= current_add.end_pos + 1 and not follows_revision:
+                # Continuation within current parent — append content
+                _append_episode_content(ep, current_add)
+                current_add.end_pos = max(current_add.end_pos, ep_start + len(text))
+                leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
+            elif follows_revision and current_add is not None and had_move_since_last_add:
+                # Return after editing elsewhere → <add type="context">
+                node = _make_node(
+                    NodeKind.ADD, "", "context", ep,
+                    start=ep_start, end=ep_start + len(text),
+                )
+                _append_episode_content(ep, node)
+                current_add.append(node)
+                current_add.end_pos = max(current_add.end_pos, ep_start + len(text))
+            else:
+                # New typing burst — create a new parent <add>
+                effective_type = rev_type
+                node = _make_node(
+                    NodeKind.ADD, "", effective_type, ep,
+                    start=ep_start, end=ep_start + len(text),
+                )
+                _append_episode_content(ep, node)
+                parent = _find_parent_node(root, ep_start, ep_start + len(text))
+                parent.append(node)
+                current_add = node
+                current_add_parent = parent
+                current_add_type = effective_type
+                had_move_since_last_add = False
+                interrupted_by_inline_typo = False
+                leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
         else:
             deleted = ep.deleted_text
             has_replace = any(a.kind == "replace" for a in ep.actions)
 
+            if had_move_since_last_add and ep_end < leading_edge_pos:
+                edited_away_from_edge = True
+
             if current_add is not None and ep_start >= current_add.start_pos and ep_end <= current_add.end_pos + 1:
                 target = current_add
+                if rev_type == "typo" and not had_move_since_last_add:
+                    interrupted_by_inline_typo = True
             else:
                 target = _find_parent_node(root, ep_start, ep_end)
 
-            if has_replace:
+            if has_cut:
+                for a in ep.actions:
+                    if a.kind == "cut" and a.deleted_text:
+                        target.append(_make_action_node(
+                            NodeKind.DEL, a.deleted_text, "translocation", a,
+                            start=a.position, end=a.position + len(a.deleted_text),
+                        ))
+            elif has_replace:
                 for a in ep.actions:
                     if a.kind == "replace":
                         if a.deleted_text:
@@ -456,6 +651,15 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                     NodeKind.DEL, deleted, rev_type, ep,
                     start=ep_start, end=ep_start + len(deleted),
                 ))
+            elif rev_type == "pre-context" and ep.net_text:
+                # Pre-context: insertion within existing text after cursor relocation
+                text = ep.net_text
+                node = _make_node(
+                    NodeKind.ADD, "", "pre-context", ep,
+                    start=ep_start, end=ep_start + len(text),
+                )
+                _append_episode_content(ep, node)
+                target.append(node)
 
         prev_ep = ep
 
@@ -505,6 +709,12 @@ def _segment_episodes(
 
 
 @dataclass
+class FocusEvent:
+    app_name: str
+    timestamp: int
+    event_id: int
+
+@dataclass
 class ConversionResult:
     segments: list[TEINode]
     final_text: str
@@ -513,6 +723,8 @@ class ConversionResult:
     metadata: SessionMetadata | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list)
     stats: ConversionStats = field(default_factory=ConversionStats)
+    focus_sources: list[FocusEvent] = field(default_factory=list)
+    source_paste_indices: set[int] = field(default_factory=set)
 
 
 def _compute_stats(
@@ -525,7 +737,7 @@ def _compute_stats(
 ) -> ConversionStats:
     return ConversionStats(
         total_events=len(events),
-        typed_chars=sum(len(a.text) for a in actions if a.kind == "insert"),
+        typed_chars=sum(len(a.text) for a in actions if a.kind in ("insert", "linebreak")),
         deletions=sum(1 for a in actions if a.kind == "delete"),
         replacements=sum(1 for a in actions if a.kind == "replace"),
         moves=sum(1 for a in actions if a.kind == "move"),
@@ -537,19 +749,50 @@ def _compute_stats(
     )
 
 
+def _detect_focus_sources(actions: list[WritingAction]) -> tuple[list[FocusEvent], set[int]]:
+    focus_sources: list[FocusEvent] = []
+    source_paste_indices: set[int] = set()
+
+    last_focus_out: FocusEvent | None = None
+    for i, a in enumerate(actions):
+        if a.kind == "focus":
+            ev_id = a.event.event_id if a.event else 0
+            fe = FocusEvent(app_name=a.text, timestamp=a.timestamp, event_id=ev_id)
+            focus_sources.append(fe)
+            last_focus_out = fe
+        elif a.kind == "paste" and last_focus_out is not None:
+            source_paste_indices.add(i)
+            last_focus_out = None
+        elif a.kind not in ("move",):
+            last_focus_out = None
+
+    return focus_sources, source_paste_indices
+
+
 def convert(
     events: list[Event],
     metadata: SessionMetadata | None = None,
     parse_warnings: int = 0,
 ) -> ConversionResult:
     actions, final_text, diagnostics = _process_events(events)
+
+    focus_sources, source_paste_indices = _detect_focus_sources(actions)
+
+    # Mark source pastes in actions for _build_tei_tree
+    for i in source_paste_indices:
+        actions[i] = WritingAction(
+            kind="paste", position=actions[i].position, text=actions[i].text,
+            deleted_text="source", event=actions[i].event, timestamp=actions[i].timestamp,
+        )
+
     episodes = _group_into_episodes(actions)
     segment_groups = _segment_episodes(episodes)
 
     segments: list[TEINode] = []
     for group in segment_groups:
         seg = _build_tei_tree(group)
-        segments.append(seg)
+        if seg.children:
+            segments.append(seg)
 
     stats = _compute_stats(events, actions, episodes, segments, diagnostics, parse_warnings)
 
@@ -561,4 +804,6 @@ def convert(
         metadata=metadata,
         diagnostics=diagnostics,
         stats=stats,
+        focus_sources=focus_sources,
+        source_paste_indices=source_paste_indices,
     )

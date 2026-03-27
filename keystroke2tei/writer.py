@@ -18,6 +18,10 @@ def _node_to_xml(node: TEINode, parent: etree._Element) -> None:
             last.tail = (last.tail or "") + node.text
         return
 
+    if node.kind == NodeKind.LB:
+        etree.SubElement(parent, "lb")
+        return
+
     if node.kind == NodeKind.SEG:
         el = etree.SubElement(parent, "seg")
         for child in node.children:
@@ -74,6 +78,7 @@ def _build_header(metadata: SessionMetadata | None = None) -> etree._Element:
 def write_tei(
     segments: list[TEINode],
     metadata: SessionMetadata | None = None,
+    focus_sources: list[object] | None = None,
 ) -> str:
     root = etree.Element("TEI", nsmap=NSMAP)
 
@@ -86,6 +91,15 @@ def write_tei(
 
     for seg_node in segments:
         _node_to_xml(seg_node, p)
+
+    if focus_sources:
+        p_sources = etree.SubElement(body, "p", source="sources")
+        for fe in focus_sources:
+            add_el = etree.SubElement(p_sources, "add", type="focus")
+            add_el.set("evidence", str(fe.event_id))  # type: ignore[union-attr]
+            media_el = etree.SubElement(add_el, "media")
+            desc_el = etree.SubElement(media_el, "desc")
+            desc_el.text = fe.app_name  # type: ignore[union-attr]
 
     return etree.tostring(
         root,
