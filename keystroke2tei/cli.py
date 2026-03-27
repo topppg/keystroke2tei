@@ -8,10 +8,11 @@ from pathlib import Path
 from keystroke2tei.parser import parse_csv
 from keystroke2tei.idfx_parser import parse_idfx
 from keystroke2tei.klicke_parser import parse_klicke
+from keystroke2tei.html_parser import parse_html
 from keystroke2tei.converter import convert
 from keystroke2tei.writer import write_tei
 
-SUPPORTED_EXTENSIONS = {".csv", ".idfx"}
+SUPPORTED_EXTENSIONS = {".csv", ".idfx", ".html"}
 
 
 def _resolve_inputs(inputs: list[Path]) -> list[Path]:
@@ -51,6 +52,8 @@ def _process_single(
     try:
         if csv_path.suffix.lower() == ".idfx":
             events, metadata, parse_warnings = parse_idfx(csv_path)
+        elif csv_path.suffix.lower() == ".html":
+            events, metadata, parse_warnings = parse_html(csv_path)
         elif _is_klicke_csv(csv_path):
             events, metadata, parse_warnings = parse_klicke(csv_path)
         else:

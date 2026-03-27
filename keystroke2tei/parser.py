@@ -20,6 +20,9 @@ def _parse_event_type(val: str) -> EventType:
 
 
 def _detect_encoding(path: Path) -> str:
+    bom = path.read_bytes()[:2]
+    if bom in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
             path.read_text(encoding=enc)
