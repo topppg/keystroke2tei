@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from keystroke2tei.converter import CharMap, WritingAction, _classify_key, _process_events, _group_into_episodes, convert, _build_tei_tree
-from keystroke2tei.models import Event, EventType, NodeKind
+from keystroke2tei.converter import CharMap, RevisionEpisode, WritingAction, _classify_key, _process_events, _group_into_episodes, convert, _build_tei_tree, _deduplicate_seq, _interleave_text_with_revisions, _segment_by_sentences, _find_sentence_ranges
+from keystroke2tei.models import Event, EventType, NodeKind, TEINode
 
 
 def _kb(event_id: int, output: str, position: int, doclength: int, start_time: int = 0) -> Event:
@@ -572,3 +572,176 @@ class TestEndToEnd:
         assert result.stats.typed_chars > 0
         assert result.stats.deletions > 0
         assert result.stats.total_events > 0
+
+
+class TestDeduplicateSeq:
+    def test_no_collision(self):
+        nodes = [
+            TEINode(kind=NodeKind.ADD, seq="000100"),
+            TEINode(kind=NodeKind.ADD, seq="000200"),
+        ]
+        seg = TEINode(kind=NodeKind.SEG, children=nodes)
+        _deduplicate_seq([seg])
+        assert nodes[0].seq == "000100"
+        assert nodes[1].seq == "000200"
+
+    def test_same_second_incremented(self):
+        nodes = [
+            TEINode(kind=NodeKind.ADD, seq="000100"),
+            TEINode(kind=NodeKind.ADD, seq="000100"),
+            TEINode(kind=NodeKind.ADD, seq="000100"),
+        ]
+        seg = TEINode(kind=NodeKind.SEG, children=nodes)
+        _deduplicate_seq([seg])
+        assert nodes[0].seq == "000100"
+        assert nodes[1].seq == "000101"
+        assert nodes[2].seq == "000102"
+
+    def test_cascade_collision(self):
+        nodes = [
+            TEINode(kind=NodeKind.ADD, seq="000100"),
+            TEINode(kind=NodeKind.ADD, seq="000100"),
+            TEINode(kind=NodeKind.DEL, seq="000101"),
+        ]
+        seg = TEINode(kind=NodeKind.SEG, children=nodes)
+        _deduplicate_seq([seg])
+        assert nodes[0].seq == "000100"
+        assert nodes[1].seq == "000101"
+        assert nodes[2].seq == "000102"  # cascaded from nodes[1] taking 000101
+
+    def test_nested_nodes(self):
+        child = TEINode(kind=NodeKind.DEL, seq="000500")
+        parent = TEINode(kind=NodeKind.ADD, seq="000500", children=[child])
+        seg = TEINode(kind=NodeKind.SEG, children=[parent])
+        _deduplicate_seq([seg])
+        assert parent.seq == "000500"
+        assert child.seq == "000501"
+
+
+class TestInterleaveTextWithRevisions:
+    def test_no_revisions_unchanged(self):
+        text = TEINode(kind=NodeKind.TEXT, text="hello")
+        add = TEINode(kind=NodeKind.ADD, start_pos=0, end_pos=5, children=[text])
+        _interleave_text_with_revisions(add)
+        assert len(add.children) == 1
+        assert add.children[0].text == "hello"
+
+    def test_basic_interleave(self):
+        # "abcde" with "c" deleted at pos 2 and "X" inserted
+        text = TEINode(kind=NodeKind.TEXT, text="abcde")
+        del_node = TEINode(kind=NodeKind.DEL, text="c", start_pos=2, end_pos=3)
+        add_node = TEINode(kind=NodeKind.ADD, start_pos=2, end_pos=3, children=[
+            TEINode(kind=NodeKind.TEXT, text="X"),
+        ])
+        parent = TEINode(kind=NodeKind.ADD, start_pos=0, end_pos=5,
+                         children=[text, del_node, add_node])
+        _interleave_text_with_revisions(parent)
+        # Expected: TEXT("ab") DEL("c") ADD("X") TEXT("de")
+        assert len(parent.children) == 4
+        assert parent.children[0].kind == NodeKind.TEXT
+        assert parent.children[0].text == "ab"
+        assert parent.children[1].kind == NodeKind.DEL
+        assert parent.children[2].kind == NodeKind.ADD
+        assert parent.children[3].kind == NodeKind.TEXT
+        assert parent.children[3].text == "de"
+
+    def test_multiple_revisions(self):
+        # "abcde" with "b" deleted at pos 1 and "d" deleted at pos 3
+        text = TEINode(kind=NodeKind.TEXT, text="abcde")
+        del1 = TEINode(kind=NodeKind.DEL, text="b", start_pos=1, end_pos=2)
+        del2 = TEINode(kind=NodeKind.DEL, text="d", start_pos=3, end_pos=4)
+        parent = TEINode(kind=NodeKind.ADD, start_pos=0, end_pos=5,
+                         children=[text, del1, del2])
+        _interleave_text_with_revisions(parent)
+        # Expected: TEXT("a") DEL("b") TEXT("c") DEL("d") TEXT("e")
+        assert len(parent.children) == 5
+        assert parent.children[0].text == "a"
+        assert parent.children[1].kind == NodeKind.DEL
+        assert parent.children[2].text == "c"
+        assert parent.children[3].kind == NodeKind.DEL
+        assert parent.children[4].text == "e"
+
+    def test_le_repas_scenario(self):
+        # "Le repas était bon et agréable" with "bon" at pos 15 deleted, "savoureux" added
+        full_text = "Le repas était bon et agréable"
+        text = TEINode(kind=NodeKind.TEXT, text=full_text)
+        del_node = TEINode(kind=NodeKind.DEL, text="bon", start_pos=15, end_pos=18)
+        add_node = TEINode(kind=NodeKind.ADD, start_pos=15, end_pos=24, children=[
+            TEINode(kind=NodeKind.TEXT, text="savoureux"),
+        ])
+        parent = TEINode(kind=NodeKind.ADD, start_pos=0, end_pos=len(full_text),
+                         children=[text, del_node, add_node])
+        _interleave_text_with_revisions(parent)
+        # Expected: TEXT("Le repas était ") DEL("bon") ADD("savoureux") TEXT(" et agréable")
+        assert len(parent.children) == 4
+        assert parent.children[0].kind == NodeKind.TEXT
+        assert parent.children[0].text == "Le repas était "
+        assert parent.children[1].kind == NodeKind.DEL
+        assert parent.children[1].text == "bon"
+        assert parent.children[2].kind == NodeKind.ADD
+        assert parent.children[3].kind == NodeKind.TEXT
+        assert parent.children[3].text == " et agréable"
+
+    def test_deletion_at_start(self):
+        text = TEINode(kind=NodeKind.TEXT, text="abcde")
+        del_node = TEINode(kind=NodeKind.DEL, text="a", start_pos=0, end_pos=1)
+        parent = TEINode(kind=NodeKind.ADD, start_pos=0, end_pos=5,
+                         children=[text, del_node])
+        _interleave_text_with_revisions(parent)
+        # Expected: DEL("a") TEXT("bcde")
+        assert len(parent.children) == 2
+        assert parent.children[0].kind == NodeKind.DEL
+        assert parent.children[1].text == "bcde"
+
+    def test_deletion_at_end(self):
+        text = TEINode(kind=NodeKind.TEXT, text="abcde")
+        del_node = TEINode(kind=NodeKind.DEL, text="e", start_pos=4, end_pos=5)
+        parent = TEINode(kind=NodeKind.ADD, start_pos=0, end_pos=5,
+                         children=[text, del_node])
+        _interleave_text_with_revisions(parent)
+        # Expected: TEXT("abcd") DEL("e")
+        assert len(parent.children) == 2
+        assert parent.children[0].text == "abcd"
+        assert parent.children[1].kind == NodeKind.DEL
+
+
+class TestSentenceSegmentation:
+    def test_find_sentence_ranges_single(self):
+        ranges = _find_sentence_ranges("Hello world")
+        assert ranges == [(0, 11)]
+
+    def test_find_sentence_ranges_two_sentences(self):
+        ranges = _find_sentence_ranges("Hello. Goodbye.")
+        assert len(ranges) == 2
+        assert ranges[0] == (0, 7)  # "Hello. "
+        assert ranges[1] == (7, 15)  # "Goodbye."
+
+    def test_find_sentence_ranges_question_exclamation(self):
+        ranges = _find_sentence_ranges("What? Yes! Done.")
+        assert len(ranges) == 3
+
+    def test_find_sentence_ranges_empty(self):
+        ranges = _find_sentence_ranges("")
+        assert ranges == [(0, 0)]
+
+    def test_segment_by_sentences_single_sentence(self):
+        ep1 = RevisionEpisode(actions=[WritingAction(kind="insert", position=0, text="hello")])
+        ep2 = RevisionEpisode(actions=[WritingAction(kind="delete", position=3, deleted_text="l")], is_revision=True)
+        groups = _segment_by_sentences([ep1, ep2], "helo")
+        assert len(groups) == 1
+        assert len(groups[0]) == 2
+
+    def test_segment_by_sentences_two_sentences(self):
+        ep1 = RevisionEpisode(actions=[WritingAction(kind="insert", position=0, text="Hi. ")])
+        ep2 = RevisionEpisode(actions=[WritingAction(kind="insert", position=4, text="Bye.")])
+        groups = _segment_by_sentences([ep1, ep2], "Hi. Bye.")
+        assert len(groups) == 2
+
+    def test_revision_groups_with_target_sentence(self):
+        ep1 = RevisionEpisode(actions=[WritingAction(kind="insert", position=0, text="Hi. ")])
+        ep2 = RevisionEpisode(actions=[WritingAction(kind="insert", position=4, text="Bye.")])
+        ep3 = RevisionEpisode(actions=[WritingAction(kind="delete", position=1, deleted_text="i")], is_revision=True)
+        groups = _segment_by_sentences([ep1, ep2, ep3], "H. Bye.")
+        # ep3 targets position 1, which is in sentence 1 ("H. ")
+        assert len(groups) == 2
+        assert ep3 in groups[0]

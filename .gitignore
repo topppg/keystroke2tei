@@ -10,3 +10,4 @@ data/output/*
 data/corpora/*
 !data/corpora/.gitkeep
 .DS_Store
+.env

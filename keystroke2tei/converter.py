@@ -405,8 +405,13 @@ def _group_into_episodes(
             current_kind = ""
             continue
 
-        # Linebreak is neutral — doesn't trigger insert↔delete split
+        # Linebreak after deletes is an insert — triggers split
         if action.kind == "linebreak":
+            if current_kind == "delete" and current.actions:
+                current.end_time = action.timestamp
+                episodes.append(current)
+                current = RevisionEpisode(start_time=action.timestamp)
+                current_kind = ""
             current.actions.append(action)
             current.end_time = action.timestamp
             last_insert_end = action.position + 1
@@ -565,7 +570,7 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                 _append_episode_content(ep, node)
                 current_add_parent.append(node)
                 current_add = node
-                current_add_type = continue_type
+                # Keep base type so next continue is also "nt|continue", not "nt|continue|continue"
                 interrupted_by_inline_typo = False
                 leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
             elif edited_away_from_edge and had_move_since_last_add and abs(ep_start - leading_edge_pos) <= 2:
@@ -647,10 +652,23 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                                 start=a.position, end=a.position + len(a.text),
                             ))
             elif deleted:
-                target.append(_make_node(
-                    NodeKind.DEL, deleted, rev_type, ep,
-                    start=ep_start, end=ep_start + len(deleted),
-                ))
+                if "\n" in deleted:
+                    del_node = _make_node(
+                        NodeKind.DEL, "", rev_type, ep,
+                        start=ep_start, end=ep_start + len(deleted),
+                    )
+                    parts = deleted.split("\n")
+                    for i, part in enumerate(parts):
+                        if part:
+                            del_node.append(TEINode(kind=NodeKind.TEXT, text=part))
+                        if i < len(parts) - 1:
+                            del_node.append(TEINode(kind=NodeKind.LB))
+                    target.append(del_node)
+                else:
+                    target.append(_make_node(
+                        NodeKind.DEL, deleted, rev_type, ep,
+                        start=ep_start, end=ep_start + len(deleted),
+                    ))
             elif rev_type == "pre-context" and ep.net_text:
                 # Pre-context: insertion within existing text after cursor relocation
                 text = ep.net_text
@@ -706,6 +724,50 @@ def _segment_episodes(
         segments.append(current)
 
     return segments
+
+
+_SENTENCE_END = re.compile(r'[.!?]["\'»)\]]?\s|[.!?]["\'»)\]]?$')
+
+
+def _find_sentence_ranges(text: str) -> list[tuple[int, int]]:
+    if not text:
+        return [(0, 0)]
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        end = m.end()
+        ranges.append((start, end))
+        start = end
+    if start < len(text):
+        ranges.append((start, len(text)))
+    if not ranges:
+        ranges.append((0, len(text)))
+    return ranges
+
+
+def _segment_by_sentences(
+    episodes: list[RevisionEpisode],
+    final_text: str,
+) -> list[list[RevisionEpisode]]:
+    if not episodes:
+        return []
+
+    ranges = _find_sentence_ranges(final_text)
+
+    buckets: list[list[RevisionEpisode]] = [[] for _ in ranges]
+
+    for ep in episodes:
+        ep_start, _ = _episode_pos_range(ep)
+        assigned = False
+        for i, (s, e) in enumerate(ranges):
+            if s <= ep_start < e:
+                buckets[i].append(ep)
+                assigned = True
+                break
+        if not assigned:
+            buckets[-1].append(ep)
+
+    return [b for b in buckets if b]
 
 
 @dataclass
@@ -769,6 +831,136 @@ def _detect_focus_sources(actions: list[WritingAction]) -> tuple[list[FocusEvent
     return focus_sources, source_paste_indices
 
 
+def _get_node_text(node: TEINode) -> str:
+    if node.text and not node.children:
+        return node.text
+    parts: list[str] = []
+    if node.text:
+        parts.append(node.text)
+    for child in node.children:
+        if child.kind == NodeKind.TEXT:
+            parts.append(child.text)
+    return "".join(parts)
+
+
+def _interleave_text_with_revisions(node: TEINode) -> None:
+    for child in node.children:
+        if child.kind in (NodeKind.ADD, NodeKind.MOD, NodeKind.SEG):
+            _interleave_text_with_revisions(child)
+
+    if node.kind not in (NodeKind.ADD, NodeKind.MOD, NodeKind.SEG):
+        return
+
+    text_items: list[TEINode] = []
+    revision_items: list[TEINode] = []
+    unpositioned: list[TEINode] = []
+
+    for child in node.children:
+        if child.kind in (NodeKind.TEXT, NodeKind.LB):
+            text_items.append(child)
+        elif child.start_pos >= 0:
+            revision_items.append(child)
+        else:
+            unpositioned.append(child)
+
+    if not text_items or not revision_items:
+        return
+
+    # Build position-indexed buffer: list of (abs_pos, char_or_lb_node)
+    buf: list[tuple[int, str | TEINode]] = []
+    pos = node.start_pos if node.start_pos >= 0 else 0
+    for item in text_items:
+        if item.kind == NodeKind.TEXT:
+            for ch in item.text:
+                buf.append((pos, ch))
+                pos += 1
+        elif item.kind == NodeKind.LB:
+            buf.append((pos, item))
+            pos += 1
+
+    # Sort revisions by position (DEL before ADD at same position)
+    revision_items.sort(key=lambda r: (r.start_pos, 0 if r.kind == NodeKind.DEL else 1))
+
+    # Walk buffer and revisions together
+    new_children: list[TEINode] = []
+    text_acc: list[str] = []
+    buf_idx = 0
+    rev_idx = 0
+
+    while buf_idx < len(buf) or rev_idx < len(revision_items):
+        # Check if next revision should be inserted before current buffer position
+        if rev_idx < len(revision_items):
+            rev = revision_items[rev_idx]
+            cur_buf_pos = buf[buf_idx][0] if buf_idx < len(buf) else float("inf")
+
+            if rev.start_pos <= cur_buf_pos:
+                if text_acc:
+                    new_children.append(TEINode(kind=NodeKind.TEXT, text="".join(text_acc)))
+                    text_acc.clear()
+
+                # Collect all revisions at this position
+                rev_pos = rev.start_pos
+                while rev_idx < len(revision_items) and revision_items[rev_idx].start_pos == rev_pos:
+                    r = revision_items[rev_idx]
+                    new_children.append(r)
+                    # Skip deleted chars in buffer
+                    if r.kind == NodeKind.DEL:
+                        del_len = len(_get_node_text(r))
+                        skipped = 0
+                        while skipped < del_len and buf_idx < len(buf):
+                            _, val = buf[buf_idx]
+                            if isinstance(val, str):
+                                buf_idx += 1
+                                skipped += 1
+                            else:
+                                break
+                    rev_idx += 1
+                continue
+
+        if buf_idx < len(buf):
+            _, val = buf[buf_idx]
+            if isinstance(val, str):
+                text_acc.append(val)
+            else:
+                if text_acc:
+                    new_children.append(TEINode(kind=NodeKind.TEXT, text="".join(text_acc)))
+                    text_acc.clear()
+                new_children.append(val)
+            buf_idx += 1
+
+    if text_acc:
+        new_children.append(TEINode(kind=NodeKind.TEXT, text="".join(text_acc)))
+
+    new_children.extend(unpositioned)
+    node.children = new_children
+
+
+def _deduplicate_seq(segments: list[TEINode]) -> None:
+    """Ensure all @seq values are unique by incrementing same-second collisions."""
+    nodes: list[TEINode] = []
+
+    def _collect(node: TEINode) -> None:
+        if node.seq:
+            nodes.append(node)
+        for child in node.children:
+            _collect(child)
+
+    for seg in segments:
+        _collect(seg)
+
+    used: set[str] = set()
+    for node in nodes:
+        if node.seq not in used:
+            used.add(node.seq)
+            continue
+        h, m, s = int(node.seq[0:2]), int(node.seq[2:4]), int(node.seq[4:6])
+        total_s = h * 3600 + m * 60 + s
+        while node.seq in used:
+            total_s += 1
+            node.seq = f"{total_s // 3600:02d}{(total_s % 3600) // 60:02d}{total_s % 60:02d}"
+        used.add(node.seq)
+
+
 def convert(
     events: list[Event],
     metadata: SessionMetadata | None = None,
@@ -786,13 +978,16 @@ def convert(
         )
 
     episodes = _group_into_episodes(actions)
-    segment_groups = _segment_episodes(episodes)
+    segment_groups = _segment_by_sentences(episodes, final_text)
 
     segments: list[TEINode] = []
     for group in segment_groups:
         seg = _build_tei_tree(group)
         if seg.children:
+            _interleave_text_with_revisions(seg)
             segments.append(seg)
+
+    _deduplicate_seq(segments)
 
     stats = _compute_stats(events, actions, episodes, segments, diagnostics, parse_warnings)
 

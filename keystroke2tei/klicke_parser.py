@@ -93,6 +93,24 @@ def parse_klicke(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                     ))
                     continue
 
+                if down_event in ("Space", "Enter", "Tab"):
+                    mapping = {"Space": "SPACE", "Enter": "RETURN", "Tab": "TAB"}
+                    events.append(Event(
+                        event_type=EventType.KEYBOARD,
+                        event_id=row_num,
+                        output=mapping[down_event],
+                        char_production=0,
+                        action_time=up_time - down_time if up_time > down_time else 0,
+                        start_time=down_time,
+                        end_time=up_time,
+                        pause_location=0,
+                        pause_location_full="",
+                        pause_time=pause_time,
+                        position=max(0, cursor_pos - 1),
+                        doclength=0,
+                    ))
+                    continue
+
                 if activity == "Input" and text_change and text_change != "NoChange":
                     output = text_change
                     if output == " ":
@@ -112,24 +130,6 @@ def parse_klicke(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                         pause_location_full="",
                         pause_time=pause_time,
                         position=pos,
-                        doclength=0,
-                    ))
-                    continue
-
-                if down_event in ("Space", "Enter", "Tab"):
-                    mapping = {"Space": "SPACE", "Enter": "RETURN", "Tab": "TAB"}
-                    events.append(Event(
-                        event_type=EventType.KEYBOARD,
-                        event_id=row_num,
-                        output=mapping[down_event],
-                        char_production=0,
-                        action_time=up_time - down_time if up_time > down_time else 0,
-                        start_time=down_time,
-                        end_time=up_time,
-                        pause_location=0,
-                        pause_location_full="",
-                        pause_time=pause_time,
-                        position=max(0, cursor_pos - 1),
                         doclength=0,
                     ))
 

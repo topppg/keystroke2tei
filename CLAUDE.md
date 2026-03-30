@@ -28,22 +28,42 @@ No other open source tool automates this conversion. The encoding step was previ
 
 ## Data
 
-Data directories are **gitignored** — not committed:
-- `data/input/` — user input files (CSV, IDFX)
-- `data/output/` — generated TEI XML + stats JSON
-- `data/corpora/` — test corpus files (KLiCKe, THEtool)
+All data lives under `data/`. Input in `data/input/`, output in `data/output/`. Both are **gitignored** — never committed. Always use subfolders to keep things organized.
+
+```
+data/
+├── input/                          # source keystroke logs
+│   ├── doc.csv                     # original test file (Inputlog CSV)
+│   ├── doc.xml                     # hand-annotated TEI reference
+│   ├── TEIoKEY/                    # GA HTML + CSV files (6 files)
+│   ├── WritingTask/                # KLiCKe corpus (~5000 files)
+│   │   └── keystrokelogs/
+│   │       ├── csv/                # KLiCKe CSVs
+│   │       └── idfx/              # IDFX versions
+│   └── <new-corpus>/               # add new corpora as subfolders here
+├── output/                         # generated TEI XML + stats JSON
+│   ├── klicke-csv/                 # output from KLiCKe CSV conversion
+│   ├── klicke-idfx/                # output from KLiCKe IDFX conversion
+│   └── <matching-subfolder>/       # mirror the input structure
+└── corpora/                        # legacy test corpus (22 IDFX + 9 KLiCKe)
+```
+
+**Rules**: input goes in `data/input/`, output goes in `data/output/`. No temp folders. Subfolder names should match between input and output.
 
 Test data must be obtained separately:
-- KLiCKe: https://github.com/terryyutian/KLiCKe-Corpus (Google Drive, ~5000 CSVs)
+- KLiCKe: https://github.com/terryyutian/KLiCKe-Corpus (Google Drive, ~5000 CSVs + IDFX)
 - THEtool: https://github.com/mulasik/wta (IDFX files in data/ directory)
 
 ## Development
 
 ```bash
-uv sync                                                    # install deps
-uv run pytest                                              # 28 tests
-uv run keystroke2tei data/input/ -o data/output/ -v --stats  # test conversion
-uv run keystroke2tei data/corpora/ -o data/output/           # test against corpus
+uv sync                                                                              # install deps
+uv run pytest                                                                        # run tests
+uv run keystroke2tei data/input/doc.csv -o data/output/ -v --stats                   # single file test
+uv run keystroke2tei data/input/TEIoKEY/ -o data/output/TEIoKEY/ -v                  # TEIoKEY files
+uv run keystroke2tei data/input/WritingTask/keystrokelogs/csv/ -o data/output/klicke-csv/   # KLiCKe CSV corpus
+uv run keystroke2tei data/input/WritingTask/keystrokelogs/idfx/ -o data/output/klicke-idfx/ # KLiCKe IDFX corpus
+uv run keystroke2tei data/corpora/ -o data/output/corpora/                           # legacy corpus
 ```
 
 ## Stress test results
