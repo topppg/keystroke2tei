@@ -48,6 +48,7 @@ def _is_klicke_csv(path: Path) -> bool:
 
 def _process_single(
     csv_path: Path, out_path: Path, verbose: bool, write_stats: bool,
+    classify: bool = False,
 ) -> bool:
     try:
         if csv_path.suffix.lower() == ".idfx":
@@ -59,6 +60,13 @@ def _process_single(
         else:
             events, metadata, parse_warnings = parse_csv(csv_path)
         result = convert(events, metadata=metadata, parse_warnings=len(parse_warnings))
+
+        if classify:
+            from keystroke2tei.classifier import reclassify_with_llm
+            changed = reclassify_with_llm(result.segments, result.final_text)
+            if verbose and changed:
+                print(f"    [classify] LLM reclassified {changed} revision(s)", file=sys.stderr)
+
         xml = write_tei(result.segments, metadata=metadata, focus_sources=result.focus_sources)
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +118,15 @@ def main() -> None:
         "--stats", action="store_true",
         help="Write a JSON sidecar with conversion statistics",
     )
+    parser.add_argument(
+        "--classify", action="store_true",
+        help="Use LLM (Gemini Flash via OpenRouter) to refine revision type classification",
+    )
     args = parser.parse_args()
+
+    if args.classify:
+        from dotenv import load_dotenv
+        load_dotenv()
 
     csv_files = _resolve_inputs(args.inputs)
     if not csv_files:
@@ -121,7 +137,7 @@ def main() -> None:
     fail = 0
     for csv_path in csv_files:
         out_path = _resolve_output(csv_path, args.output)
-        if _process_single(csv_path, out_path, args.verbose, args.stats):
+        if _process_single(csv_path, out_path, args.verbose, args.stats, args.classify):
             ok += 1
         else:
             fail += 1
