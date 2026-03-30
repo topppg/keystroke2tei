@@ -935,6 +935,21 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
     node.children = new_children
 
 
+def _is_whitespace_only(node: TEINode) -> bool:
+    if node.kind not in (NodeKind.ADD, NodeKind.DEL):
+        return False
+    if any(c.kind not in (NodeKind.TEXT,) for c in node.children):
+        return False
+    all_text = (node.text or "") + "".join(c.text for c in node.children if c.kind == NodeKind.TEXT)
+    return not all_text or all_text.isspace()
+
+
+def _strip_whitespace_only_nodes(node: TEINode) -> None:
+    for child in node.children:
+        _strip_whitespace_only_nodes(child)
+    node.children = [c for c in node.children if not _is_whitespace_only(c)]
+
+
 def _deduplicate_seq(segments: list[TEINode]) -> None:
     """Ensure all @seq values are unique by incrementing same-second collisions."""
     nodes: list[TEINode] = []
@@ -985,6 +1000,7 @@ def convert(
         seg = _build_tei_tree(group)
         if seg.children:
             _interleave_text_with_revisions(seg)
+            _strip_whitespace_only_nodes(seg)
             segments.append(seg)
 
     _deduplicate_seq(segments)
