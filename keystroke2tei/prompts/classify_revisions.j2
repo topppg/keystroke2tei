@@ -6,7 +6,7 @@ Keystroke Loxensis encodes the WRITING PROCESS — not the final document, but e
 
 You are given a list of revisions from a single writing session. Your task is to classify each revision into the correct type. The revisions are presented in chronological order — this order matters, because classification depends on what the writer had written AT THE TIME of each revision.
 
-## The types and how to distinguish them
+## Base types
 
 ### "typo"
 Immediate correction of a just-typed error. The writer notices a mistake right away and fixes it, typically with backspace, WITHOUT relocating the cursor to a different part of the text.
@@ -19,18 +19,23 @@ Spec example — writer typed "aper" instead of "paper", immediately backspaced 
 <add type="nt|continue">paper</add>
 ```
 
+Spec example — writer typed lowercase "h", then relocated cursor back to fix capitalisation:
+```xml
+<add type="nt"><del type="typo">h</del><add type="typo">H</add>e says: </add>
+```
+
 ### "pre-context"
 Revision within a sentence that is NOT YET FINISHED. The writer goes back to change something in the current sentence before completing it. The critical test: at the moment of revision, the sentence had no ending punctuation (.!?).
 
 Key signals: the sentence containing the revision was still being written (no final period/question mark/exclamation mark yet). The writer may or may not have relocated the cursor.
 
-Spec example — writer typed "Does it make writing easier, or is this you", then immediately deleted "you" and continued with "just a myth?":
+Spec example — writer immediately deleted "you" without cursor relocation and continued:
 ```xml
 <add type="nt">Does it make writing easier, or is this <del type="pre-context">you</del></add>
 <add type="nt|continue">just a myth?</add>
 ```
 
-Spec example — writer went back within an unfinished sentence to change "bon" to "savoureux":
+Spec example — writer relocated cursor within an unfinished sentence to change "bon" to "savoureux":
 ```xml
 <add type="nt">Le repas était <del type="pre-context">bon</del><add type="pre-context">savoureux</add> et agréable</add>
 ```
@@ -40,7 +45,7 @@ Revision in ALREADY-COMPLETED text. The sentence was finished (has ending punctu
 
 Key signals: the sentence was already complete with ending punctuation at the time of the revision. The writer relocated the cursor to return to finished text.
 
-Spec example — writer had completed "Louise Doughty always thought she needed the connection to the paper." then LATER returned to replace "thought" with "used to think that":
+Spec example — writer had completed "Louise Doughty always thought she needed the connection to the paper." then LATER returned to replace "thought":
 ```xml
 <del type="context">thought </del>
 <add type="context">used to think that </add>
@@ -52,38 +57,81 @@ Spec example — writer finished "The Print Layout, imitating paper." then LATER
 ```
 
 ### "continue"
-Return to finish an INCOMPLETE sentence after editing elsewhere. The writer left a sentence unfinished (no ending punctuation), went to a different part of the text to make edits, then came back to the end of the unfinished sentence to complete it. This is NOT a revision of existing text — it is new text that finishes a sentence.
+Return to finish an INCOMPLETE sentence after editing elsewhere. The writer left a sentence unfinished (no ending punctuation), went to a different part of the text to make edits, then came back to the end of the unfinished sentence to complete it. This produces a `<mod>` element, not `<add>`.
 
-Key signals: (1) a sentence was left without ending punctuation, (2) the writer went elsewhere to edit, (3) the writer returned to the end of the unfinished sentence, (4) the text added completes the sentence.
+Key signals: (1) a sentence was left without ending punctuation, (2) the writer went elsewhere to edit or revise, (3) the writer returned to the end of the unfinished sentence, (4) the text added completes or extends the sentence.
 
-Spec example — writer typed "My handwriting is " then went elsewhere to make revisions, then returned to finish with "terrible.":
+Spec example — writer typed "My handwriting is " then went elsewhere to make revisions, then returned to finish:
 ```xml
 <add type="nt">My handwriting is </add>
 <mod type="continue">terrible.</mod>
 ```
 
+IMPORTANT: Adding final punctuation (a period, question mark, or exclamation mark) to a sentence after going elsewhere to edit IS "continue" — the writer left the sentence unfinished, edited elsewhere, then came back to close it. Even a single "." qualifies if the writer left and returned.
+
+## Compound (pipe) types
+
+When a revision is interrupted by an immediate correction and then resumed, the resumed part gets a compound type with `|continue` appended:
+
+### "nt|continue"
+New text production resumed after an inline typo correction without cursor relocation. The writer was typing new text, made a typo, fixed it immediately (backspace), and continued typing. The text after the correction is `nt|continue`.
+
+Spec example — writer typed "O'Keff", backspaced "ff" (typo), then continued with "effe.":
+```xml
+<add type="nt">The desktop: ...O'Ke<del type="typo">ff</del></add>
+<add type="nt|continue">effe.</add>
+```
+
+### "pre-context|continue"
+A pre-contextual addition that was interrupted by a typo correction, then resumed.
+
+Spec example — writer was inserting "Finder, Calendar..." (pre-context), made a typo on "Cala", fixed it, then continued the pre-contextual insertion:
+```xml
+<add type="pre-context">Finder, Cal<del type="typo">a</del></add>
+<add type="pre-context|continue">endar, Safari, Microsoft Outlook, </add>
+```
+
+### "continue|continue"
+A continuation (`<mod type="continue">`) that itself gets interrupted by a typo correction, then resumed.
+
+Spec example — writer returned to finish a sentence, typed "Scrivener, ado" (typo on "Adobe"), fixed it, then continued:
+```xml
+<mod type="continue">Scrivener, <del type="typo">ado</del></mod>
+<mod type="continue|continue">Adobe Acrobat Reader, the Downloads folder, Bin.</mod>
+```
+
+### "context|continue"
+A contextual revision that was interrupted by a typo correction, then resumed. Same pattern — the resumed part is `context|continue`.
+
 ## Decision flowchart
 
 For each revision, ask these questions in order:
 
-1. Was the correction made IMMEDIATELY after typing the error, at the current typing position, without cursor relocation?
+1. Is this text that RESUMES after an immediately preceding typo correction, without cursor relocation?
+   → YES: use the **previous base type + "|continue"** (e.g., `nt|continue`, `pre-context|continue`, `continue|continue`)
+
+2. Was the correction made IMMEDIATELY after typing the error, at the current typing position, without cursor relocation?
    → YES: **typo**
 
-2. Was the sentence containing the revision COMPLETE (had ending punctuation .!?) at the time of revision?
+3. Was the sentence containing the revision COMPLETE (had ending punctuation .!?) at the time of revision?
    → YES: **context**
-   → NO: go to 3
+   → NO: go to 4
 
-3. Is this NEW text that FINISHES an incomplete sentence, added after the writer went elsewhere to edit and then returned?
+4. Is this NEW text that FINISHES or EXTENDS an incomplete sentence, added after the writer went elsewhere to edit and then returned to the leading edge?
    → YES: **continue**
    → NO: **pre-context**
+
+## Multi-sentence revisions
+
+When a revision spans text across two sentences, classify based on the FIRST sentence affected. If the writer deletes text that crosses a sentence boundary, the type is determined by whether the first sentence was complete at the time.
 
 ## Important notes
 
 - The chronological order of revisions tells you what existed at each point in time
 - A sentence is "complete" when it has ending punctuation (.!?) — not just when it has a subject and verb
 - "continue" produces a `<mod>` element, not `<add>` — it is specifically about returning to finish an abandoned sentence
-- Adding a period/final punctuation to an otherwise-complete sentence after going elsewhere to edit IS "continue" — the writer left the sentence unfinished, edited elsewhere, then came back to add the final punctuation
 - When in doubt between "pre-context" and "context", look at whether ending punctuation existed for that sentence at the time of revision
+- Compound types (with `|continue`) only apply when a revision was INTERRUPTED by an immediate typo correction and then RESUMED — not for any sequence of revisions
 
 ## Your task
 
@@ -94,4 +142,4 @@ Revisions (in chronological order):
 {{ revisions }}
 
 For each revision, respond with ONLY a valid JSON array, no other text:
-[{"id": 1, "type": "typo|pre-context|context|continue"}, ...]
+[{"id": 1, "type": "typo|pre-context|context|continue|nt|continue|pre-context|continue|context|continue|continue|continue"}, ...]
