@@ -10,6 +10,8 @@ from keystroke2tei.idfx_parser import parse_idfx
 from keystroke2tei.klicke_parser import parse_klicke
 from keystroke2tei.html_parser import parse_html
 from keystroke2tei.converter import convert
+from keystroke2tei.review import apply_overrides, build_review_report, load_overrides
+from keystroke2tei.validation import validate_tei
 from keystroke2tei.writer import write_tei
 
 SUPPORTED_EXTENSIONS = {".csv", ".idfx", ".html"}
@@ -49,6 +51,9 @@ def _is_klicke_csv(path: Path) -> bool:
 def _process_single(
     csv_path: Path, out_path: Path, verbose: bool, write_stats: bool,
     classify: bool = False,
+    review_report: bool = False,
+    overrides_path: Path | None = None,
+    validate: bool = False,
 ) -> bool:
     try:
         if csv_path.suffix.lower() == ".idfx":
@@ -67,7 +72,11 @@ def _process_single(
             if verbose and changed:
                 print(f"    [classify] LLM reclassified {changed} revision(s)", file=sys.stderr)
 
+        if overrides_path is not None:
+            apply_overrides(result, load_overrides(overrides_path))
+
         xml = write_tei(result.segments, metadata=metadata, focus_sources=result.focus_sources)
+        validation_issues = validate_tei(xml) if validate else []
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(xml, encoding="utf-8")
@@ -77,9 +86,15 @@ def _process_single(
               f"({s.typed_chars} chars, {s.deletions} dels, "
               f"{s.episodes} episodes, {s.segments} segments)")
 
+        text_mismatch = False
         for diagnostic in result.diagnostics:
             if diagnostic.message.startswith("TEI reading text differs"):
+                text_mismatch = True
                 print(f"    [warning] {diagnostic.message}", file=sys.stderr)
+
+        for issue in validation_issues:
+            print(f"    [{issue.severity}] {issue.code} at {issue.location}: {issue.message}",
+                  file=sys.stderr)
 
         if verbose:
             if parse_warnings:
@@ -98,7 +113,24 @@ def _process_single(
                 encoding="utf-8",
             )
 
-        return True
+        if review_report:
+            report = build_review_report(result)
+            if validate:
+                report["validation_issues"] = [
+                    {"severity": issue.severity, "code": issue.code,
+                     "message": issue.message, "location": issue.location}
+                    for issue in validation_issues
+                ]
+            report_path = out_path.with_name(
+                out_path.stem.removesuffix(".tei") + ".review.json"
+            )
+            report_path.write_text(
+                json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+        return not (any(issue.severity == "error" for issue in validation_issues)
+                    or (validate and text_mismatch))
     except Exception as e:
         print(f"  ERROR {csv_path.name}: {e}", file=sys.stderr)
         return False
@@ -128,6 +160,18 @@ def main() -> None:
         "--classify", action="store_true",
         help="Use LLM (Gemini Flash via OpenRouter) to refine revision type classification",
     )
+    parser.add_argument(
+        "--validate", action="store_true",
+        help="Validate output against TEI P5 and Keystroke Loxensis rules",
+    )
+    parser.add_argument(
+        "--review-report", action="store_true",
+        help="Write a JSON sidecar listing editorial review items",
+    )
+    parser.add_argument(
+        "--overrides", type=Path,
+        help="Apply editorial overrides from a JSON file, or a directory of <stem>.overrides.json files",
+    )
     args = parser.parse_args()
 
     if args.classify:
@@ -147,11 +191,25 @@ def main() -> None:
     out_paths = [_resolve_output(path, args.output) for path in csv_files]
     if len(set(out_paths)) != len(out_paths):
         parser.error("multiple inputs would write to the same output file")
+    if args.overrides is not None:
+        if not args.overrides.exists():
+            parser.error("--overrides path does not exist")
+        if args.overrides.is_file() and len(csv_files) > 1:
+            parser.error("a single overrides file requires a single input")
 
     ok = 0
     fail = 0
     for csv_path, out_path in zip(csv_files, out_paths):
-        if _process_single(csv_path, out_path, args.verbose, args.stats, args.classify):
+        overrides_path = None
+        if args.overrides is not None:
+            candidate = (args.overrides / f"{csv_path.stem}.overrides.json"
+                         if args.overrides.is_dir() else args.overrides)
+            if candidate.is_file():
+                overrides_path = candidate
+        if _process_single(
+            csv_path, out_path, args.verbose, args.stats, args.classify,
+            args.review_report, overrides_path, args.validate,
+        ):
             ok += 1
         else:
             fail += 1

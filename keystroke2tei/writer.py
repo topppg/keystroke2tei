@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from lxml import etree
 
 from keystroke2tei.converter import FocusEvent, _ms_to_seq
@@ -100,7 +102,13 @@ def write_tei(
                 p_sources, "add", seq=_ms_to_seq(fe.timestamp),
                 type="focus", evidence=str(fe.event_id),
             )
-            media_el = etree.SubElement(add_el, "media", url=fe.app_name)
+            source_type = (
+                "Internet" if fe.app_name.startswith(("http://", "https://"))
+                else "Application"
+            )
+            media_el = etree.SubElement(
+                add_el, "media", url=quote(fe.app_name, safe="/:?&=#%"), mimeType=source_type,
+            )
             desc_el = etree.SubElement(media_el, "desc")
             desc_el.text = fe.app_name
 
