@@ -243,6 +243,11 @@ override; the `issues` list is recalculated from the current tree.
 
 The corpus figures above measure conversion and text fidelity. They do not certify every inferred revision type or sentence boundary; those remain editorial decisions.
 
+## License
+
+This project is licensed under the [MIT License](LICENSE). The bundled TEI
+schema retains the [TEI Consortium's separate license](keystroke2tei/schemas/LICENSE-TEI.md).
+
 ## References
 
 - Bekius, L. (2021). [The Reconstruction of the Author's Movement Through the Text](https://extant-cmg.github.io/eXtant-wiki/loxensis/encoding). Keystroke Loxensis encoding manual.
