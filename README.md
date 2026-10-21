@@ -43,17 +43,22 @@ Each `<del>` shows exactly what the writer typed and then deleted. `@seq` gives 
 
 ### Architecture
 
-The converter trusts **CSV positions as absolute truth**. It uses a position-indexed character map (`CharMap`) that only tracks characters explicitly seen in the log. Autocomplete/spellcheck insertions are tracked as unknown (`None`) rather than guessed.
+The converter replays actions at their pre-event cursor position. The KLiCKe
+CSV and IDFX parsers normalize recorded post-key positions before replay.
+A position-indexed character map (`CharMap`)
+tracks characters explicitly seen in the log. Autocomplete/spellcheck
+insertions are tracked as unknown (`None`) rather than guessed.
 
 Validated against:
 - 4,992 KLiCKe CSV files and 4,992 corresponding IDFX files: all converted without exceptions, and all 9,984 TEI reading texts matched the replayed texts. Source-attribute and editorial review findings remain.
 - 1 Inputlog CSV and 4 TEIoKEY HTML files: all converted with matching reading text.
 
-All 9,984 KLiCKe outputs pass the bundled TEI schema. The Loxensis audit found
-176 repeated-evidence warnings in CSV output. In IDFX output it found 94,839
-operations without a source-derived `@seq` and 29,664 repeated-evidence
-warnings. These counts describe operations, not files; the IDFX source does not
-record timestamps for many replacement events.
+All 9,984 KLiCKe outputs pass the bundled TEI schema. The Loxensis audit still
+flags IDFX replacement operations without source-derived `@seq` and operations
+sharing a source event ID. The IDFX files do not record timestamps for
+replacement events. The cursor correction and a sample comparison with saved
+final documents are documented in
+[the IDFX provenance audit](docs/idfx-provenance-audit.md).
 
 ## Installation
 

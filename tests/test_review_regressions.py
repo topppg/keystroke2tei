@@ -60,6 +60,32 @@ def test_idfx_replacement_preserves_spaces_and_uses_no_stale_doclength(tmp_path)
     assert events[1].doclength == 0
 
 
+def test_idfx_wordlog_post_key_positions_replay_at_pre_key_cursor(tmp_path):
+    path = tmp_path / "post-key.idfx"
+    path.write_text(
+        '<log>'
+        '<event id="1" type="keyboard">'
+        '<part type="wordlog"><position>1</position><documentLength>1</documentLength></part>'
+        '<part type="winlog"><key>VK_A</key><value>a</value><startTime>1000</startTime></part>'
+        '</event>'
+        '<event id="2" type="keyboard">'
+        '<part type="wordlog"><position>2</position><documentLength>2</documentLength></part>'
+        '<part type="winlog"><key>VK_B</key><value>b</value><startTime>2000</startTime></part>'
+        '</event>'
+        '<event id="3" type="keyboard">'
+        '<part type="wordlog"><position>1</position><documentLength>1</documentLength></part>'
+        '<part type="winlog"><key>VK_BACK</key><startTime>3000</startTime></part>'
+        '</event>'
+        '</log>',
+        encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx(path)
+    assert warnings == []
+    assert [(event.position, event.doclength) for event in events] == [(0, 0), (1, 1), (2, 2)]
+    result = convert(events)
+    assert result.final_text == "a"
+
+
 def test_batch_rejects_single_output_file(tmp_path, monkeypatch):
     first = tmp_path / "first.csv"
     second = tmp_path / "second.csv"

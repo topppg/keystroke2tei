@@ -1,0 +1,60 @@
+# IDFX provenance and editorial audit
+
+The KLiCKe WritingTask corpus includes an IDFX log, a CSV log, and a saved
+final `.txt` document for each session. The saved document is an independent
+check on the replayed text; agreement between TEI and replay alone does not
+establish agreement with the writer's final document.
+
+## Event fields
+
+An inspection of all 4,992 IDFX logs found 99,342 `<event
+type="replacement">` elements. Every one has only a `wordlog` part with
+`start`, `end`, and `newtext`; none has an event timestamp or a `winlog` part.
+Most are bracketed by timed keyboard events, but those only give a time
+interval, not the replacement's exact time. The paired CSV log does not have
+a matching replacement event ID. An exact `@seq` for these operations cannot
+be recovered from these sources.
+
+IDFX keyboard `wordlog/position` and `wordlog/documentLength` describe the
+state **after** the key. The converter replays keys using the cursor and
+length **before** the key. The parser now converts the recorded values for
+insertion, backspace, and delete keys. This correction does not impute a
+timestamp or alter the source event ID.
+
+One replacement can produce a `<del>` and an `<add>` with the same ID, and a
+single operation can be split into several TEI elements at sentence or
+crossing-edit boundaries. The resulting repeated `@evidence` values remain
+visible as warnings: assigning a different source ID to either element
+would break the link to the log.
+
+## Sample against saved documents
+
+The audit compared every 50th IDFX file in sorted filename order (100
+sessions) with the corresponding saved `.txt` file. Similarity here is
+Python `difflib.SequenceMatcher` with `autojunk=False`; it is a triage measure,
+not a claim of editorial equivalence.
+
+| Measure | Before cursor correction | After cursor correction |
+| --- | ---: | ---: |
+| Mean text similarity | 0.94144 | 0.98226 |
+| Sessions improved | — | 100 of 100 |
+| Sessions regressed | — | 0 of 100 |
+
+Two traced sessions show the scale of the correction: `81294539` rose from
+0.94372 to 0.99963 similarity to its saved document; `10024141` rose from
+0.93461 to 0.99222. Remaining differences include punctuation, whitespace,
+and text affected by replacement or unrecorded key values.
+
+The sample also contains cases requiring editorial investigation. Session
+`76924690` has 260 replacement events, empty key values for `VK_OEM_7`, and
+0.72842 similarity after correction. Session `94457320` has a long passage
+in the saved document that the current IDFX replay does not recover (0.86266
+similarity). These are not safe to repair by copying final text into TEI:
+that would assign no source writing action to the inserted content.
+
+Sentence boundaries and revision types still require reading the source
+session. This review found a false boundary at `U.S. citizens`; the sentence
+splitter now keeps an acronym with a following lowercase word. The review
+report lists every remaining boundary and inferred type; a final
+document comparison should be used alongside it, particularly for sessions
+with replacement events or unsupported virtual keys.
