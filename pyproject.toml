@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "keystroke2tei"
 version = "0.1.0"
 description = "Convert Inputlog keystroke CSV logs to TEI XML genetic editions"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "lxml>=5.0",
