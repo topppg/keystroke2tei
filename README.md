@@ -106,7 +106,7 @@ print(result.diagnostics)
 uv run pytest
 ```
 
-28 tests covering: CharMap operations, key classification, event processing, episode grouping, and end-to-end conversion.
+Tests cover CharMap operations, key classification, event processing, episode grouping, parsing edge cases, and end-to-end conversion.
 
 ## Project structure
 
@@ -160,6 +160,7 @@ This tool follows the [Keystroke Loxensis](https://extant-cmg.github.io/eXtant-w
 
 - **Deleted text from autocomplete is empty.** When a backspace deletes a character inserted by autocomplete (not by the writer), the `<del>` element has empty text. By design.
 - **Segmentation is heuristic.** Based on time gaps, sentence endings, and cursor jumps. May need manual adjustment for complex sessions.
+- **IDFX replacement events have no recorded timestamp.** They retain their event order, but cannot receive a time-derived `@seq`.
 - **No `nt|continue` or `context|continue` pipe types yet.** The Loxensis spec supports compound types for interrupted continuations. Currently, continuation text flows as inline text without explicit type markup.
 - **No deep nesting.** Revisions within revisions are supported but deeply recursive patterns may flatten.
 

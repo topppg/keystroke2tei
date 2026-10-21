@@ -162,7 +162,8 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                 if wordlog is not None:
                     start = _int(wordlog.find("start"))
                     end = _int(wordlog.find("end"))
-                    newtext = _text(wordlog.find("newtext"))
+                    newtext_el = wordlog.find("newtext")
+                    newtext = (newtext_el.text or "") if newtext_el is not None else ""
                     output = f"[{start}:{end}] {newtext}"
 
                     events.append(Event(
@@ -177,7 +178,7 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                         pause_location_full="",
                         pause_time=0,
                         position=start,
-                        doclength=doclength if 'doclength' in dir() else 0,
+                        doclength=0,
                     ))
 
             elif event_type_str in ("focus", "mouse"):

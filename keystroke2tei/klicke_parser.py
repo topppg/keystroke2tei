@@ -32,7 +32,9 @@ def parse_klicke(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
         for row_num, row in enumerate(reader, start=2):
             try:
                 down_event = row.get("DownEvent", "").strip().strip('"')
-                text_change = row.get("TextChange", "").strip().strip('"')
+                # csv.DictReader has already removed CSV quoting. Whitespace and
+                # quote characters in TextChange are actual document content.
+                text_change = row.get("TextChange", "")
                 activity = row.get("Activity", "").strip().strip('"')
                 cursor_pos = _parse_int(row.get("CursorPosition", "0"))
                 down_time = _parse_int(row.get("DownTime", "0"))
