@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
 
 from keystroke2tei.models import ConversionStats, Diagnostic, Event, EventType, NodeKind, SessionMetadata, TEINode
 
@@ -58,12 +59,17 @@ class WritingAction:
     deleted_text: str = ""
     event: Event | None = None
     timestamp: int = 0
+    context_complete: bool = False
+    final_positions: list[int | None] = field(default_factory=list)
+    final_anchor: int | None = None
 
 
 @dataclass
 class CharMap:
     """Position-indexed character map. None = unknown (autocomplete-inserted)."""
     _chars: list[str | None] = field(default_factory=list)
+    _origins: list[tuple[WritingAction, int] | None] = field(default_factory=list)
+    _markers: list[WritingAction] = field(default_factory=list)
 
     @property
     def length(self) -> int:
@@ -71,30 +77,67 @@ class CharMap:
 
     def pad_to(self, target_len: int) -> None:
         if target_len > self.length:
-            self._chars.extend([None] * (target_len - self.length))
+            difference = target_len - self.length
+            self._chars.extend([None] * difference)
+            self._origins.extend([None] * difference)
 
-    def insert(self, pos: int, char: str) -> None:
+    def insert(self, pos: int, char: str, origin: tuple[WritingAction, int] | None = None) -> None:
         pos = max(0, min(pos, self.length))
+        for marker in self._markers:
+            if marker.final_anchor is not None and marker.final_anchor > pos:
+                marker.final_anchor += 1
         self._chars.insert(pos, char)
+        self._origins.insert(pos, origin)
 
     def delete(self, pos: int) -> str:
         if 0 <= pos < self.length:
+            for marker in self._markers:
+                if marker.final_anchor is not None and marker.final_anchor > pos:
+                    marker.final_anchor -= 1
             ch = self._chars.pop(pos)
+            self._origins.pop(pos)
             return ch if ch is not None else ""
         return ""
 
-    def replace_range(self, start: int, end: int, new_text: str) -> str:
+    def mark_deleted(self, action: WritingAction) -> None:
+        action.final_anchor = action.position
+        self._markers.append(action)
+
+    def replace_range(
+        self, start: int, end: int, new_text: str,
+        action: WritingAction | None = None,
+    ) -> str:
         start = max(0, start)
         end = min(end, self.length)
         old_chars = self._chars[start:end]
         old_text = "".join(c for c in old_chars if c is not None)
+        delta = len(new_text) - (end - start)
+        for marker in self._markers:
+            anchor = marker.final_anchor
+            if anchor is None:
+                continue
+            if anchor >= end:
+                marker.final_anchor += delta
+            elif start < anchor < end:
+                marker.final_anchor = start
         del self._chars[start:end]
+        del self._origins[start:end]
         for i, ch in enumerate(new_text):
             self._chars.insert(start + i, ch)
+            self._origins.insert(start + i, (action, i) if action is not None else None)
         return old_text
 
     def get_text(self) -> str:
         return "".join(c for c in self._chars if c is not None)
+
+    def sentence_complete_at(self, pos: int) -> bool:
+        """Whether the sentence at pos already has closing punctuation."""
+        for ch in self._chars[max(0, pos):]:
+            if ch in (".", "!", "?"):
+                return True
+            if ch == "\n":
+                return False
+        return False
 
 
 @dataclass
@@ -104,6 +147,8 @@ class RevisionEpisode:
     end_time: int = 0
     is_revision: bool = False
     cursor_moved_back: bool = False
+    revision_type_hint: str = ""
+    force_new_add: bool = False
 
     @property
     def net_text(self) -> str:
@@ -194,11 +239,13 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         cut_text += ch if ch else ""
                 clipboard = cut_text
                 if cut_text and pending_clipboard_ev:
-                    actions.append(WritingAction(
+                    cut_action = WritingAction(
                         kind="cut", position=pending_clipboard_cursor,
                         deleted_text=cut_text, event=pending_clipboard_ev,
                         timestamp=pending_clipboard_ev.start_time,
-                    ))
+                    )
+                    cmap.mark_deleted(cut_action)
+                    actions.append(cut_action)
             elif pending_clipboard_op == "CTRL+C":
                 # Infer copied text from selection (same length logic as cut but no delete)
                 # We can't determine copy content without selection info; best effort
@@ -214,13 +261,15 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                 else:
                     paste_text = ""
                 if paste_text and pending_clipboard_ev:
-                    for i, ch in enumerate(paste_text):
-                        cmap.insert(pending_clipboard_cursor + i, ch)
-                    actions.append(WritingAction(
+                    paste_action = WritingAction(
                         kind="paste", position=pending_clipboard_cursor,
                         text=paste_text, event=pending_clipboard_ev,
                         timestamp=pending_clipboard_ev.start_time,
-                    ))
+                        final_positions=[None] * len(paste_text),
+                    )
+                    for i, ch in enumerate(paste_text):
+                        cmap.insert(pending_clipboard_cursor + i, ch, (paste_action, i))
+                    actions.append(paste_action)
             pending_clipboard_op = None
             pending_clipboard_ev = None
 
@@ -250,12 +299,18 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                 start, end, new_text = int(m.group(1)), int(m.group(2)), m.group(3)
                 start = max(0, min(start, cmap.length))
                 end = max(start, min(end, cmap.length))
-                old_text = cmap.replace_range(start, end, new_text)
+                context_complete = cmap.sentence_complete_at(start)
+                old_text = "".join(ch for ch in cmap._chars[start:end] if ch is not None)
                 if old_text != new_text:
-                    actions.append(WritingAction(
+                    replace_action = WritingAction(
                         kind="replace", position=start, text=new_text,
                         deleted_text=old_text, event=ev, timestamp=ev.start_time,
-                    ))
+                        context_complete=context_complete,
+                        final_positions=[None] * len(new_text),
+                    )
+                    cmap.replace_range(start, end, new_text, replace_action)
+                    cmap.mark_deleted(replace_action)
+                    actions.append(replace_action)
                 else:
                     diagnostics.append(Diagnostic(
                         event_id=ev.event_id, timestamp=ev.start_time,
@@ -280,10 +335,12 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                 continue
 
             cursor = ev.position  # pre-event cursor from CSV
+            context_complete = cmap.sentence_complete_at(cursor)
 
             if key == "BACK":
                 del_pos = cursor - 1
                 if del_pos >= 0:
+                    deleted_sentence_complete = cmap.sentence_complete_at(del_pos)
                     deleted = cmap.delete(del_pos)
                     if not deleted:
                         diagnostics.append(Diagnostic(
@@ -291,10 +348,13 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                             message=f"unknown deleted char at position {del_pos}",
                             level="warning",
                         ))
-                    actions.append(WritingAction(
+                    delete_action = WritingAction(
                         kind="delete", position=del_pos,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
-                    ))
+                        context_complete=deleted_sentence_complete,
+                    )
+                    cmap.mark_deleted(delete_action)
+                    actions.append(delete_action)
             elif key == "DELETE":
                 if cursor < cmap.length:
                     deleted = cmap.delete(cursor)
@@ -304,58 +364,81 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                             message=f"unknown deleted char at position {cursor}",
                             level="warning",
                         ))
-                    actions.append(WritingAction(
+                    delete_action = WritingAction(
                         kind="delete", position=cursor,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
-                    ))
+                        context_complete=context_complete,
+                    )
+                    cmap.mark_deleted(delete_action)
+                    actions.append(delete_action)
             elif key == "RETURN":
-                cmap.insert(cursor, "\n")
-                actions.append(WritingAction(
+                action = WritingAction(
                     kind="linebreak", position=cursor, text="\n",
                     event=ev, timestamp=ev.start_time,
-                ))
+                    context_complete=context_complete,
+                    final_positions=[None],
+                )
+                cmap.insert(cursor, "\n", (action, 0))
+                actions.append(action)
             elif key in ("CTRL+X", "CTRL+C", "CTRL+V"):
                 pending_clipboard_op = key
                 pending_clipboard_ev = ev
                 pending_clipboard_cursor = cursor
             else:
-                for i, ch in enumerate(key):
-                    cmap.insert(cursor + i, ch)
-                actions.append(WritingAction(
+                action = WritingAction(
                     kind="insert", position=cursor, text=key,
                     event=ev, timestamp=ev.start_time,
-                ))
+                    context_complete=context_complete,
+                    final_positions=[None] * len(key),
+                )
+                for i, ch in enumerate(key):
+                    cmap.insert(cursor + i, ch, (action, i))
+                actions.append(action)
 
             prev_cursor = ev.position
 
     # Resolve any trailing clipboard op (last event was cut/copy/paste)
     if pending_clipboard_op == "CTRL+V" and clipboard and pending_clipboard_ev:
-        for i, ch in enumerate(clipboard):
-            cmap.insert(pending_clipboard_cursor + i, ch)
-        actions.append(WritingAction(
+        paste_action = WritingAction(
             kind="paste", position=pending_clipboard_cursor,
             text=clipboard, event=pending_clipboard_ev,
             timestamp=pending_clipboard_ev.start_time,
-        ))
+            final_positions=[None] * len(clipboard),
+        )
+        for i, ch in enumerate(clipboard):
+            cmap.insert(pending_clipboard_cursor + i, ch, (paste_action, i))
+        actions.append(paste_action)
+
+    visible_prefix = [0]
+    for char, origin in zip(cmap._chars, cmap._origins):
+        if char is not None and origin is not None:
+            action, offset = origin
+            action.final_positions[offset] = visible_prefix[-1]
+        visible_prefix.append(visible_prefix[-1] + (char is not None))
+    for marker in cmap._markers:
+        if marker.final_anchor is not None:
+            index = max(0, min(marker.final_anchor, len(cmap._chars)))
+            marker.final_anchor = visible_prefix[index]
 
     return actions, cmap.get_text(), diagnostics
 
 
 def _classify_revision_type(episode: RevisionEpisode) -> str:
+    if episode.revision_type_hint:
+        return episode.revision_type_hint
     if not episode.is_revision:
         return "nt"
 
     has_delete = any(a.kind == "delete" for a in episode.actions)
     has_replace = any(a.kind == "replace" for a in episode.actions)
 
+    context_complete = episode.actions[0].context_complete if episode.actions else False
+
     if has_replace:
-        return "context"
+        return "context" if context_complete else "pre-context"
 
     if episode.cursor_moved_back:
-        if has_delete:
-            return "context"
-        # Cursor relocated backward, insertion only → pre-context
-        return "pre-context"
+        return "context" if context_complete else "pre-context"
 
     if has_delete:
         # Inline backspace without cursor relocation → typo
@@ -415,7 +498,22 @@ def _group_into_episodes(
             current.actions.append(action)
             current.end_time = action.timestamp
             last_insert_end = action.position + 1
+            current_kind = "insert"
             continue
+
+        # A position change between inserts is an implicit cursor relocation.
+        if (
+            action.kind == "insert" and current_kind == "insert"
+            and current.actions and action.position != last_insert_end
+        ):
+            current.end_time = action.timestamp
+            episodes.append(current)
+            moved_back = action.position < last_insert_end
+            current = RevisionEpisode(
+                start_time=action.timestamp, is_revision=moved_back,
+                cursor_moved_back=moved_back,
+            )
+            current_kind = ""
 
         # Split at insert↔delete transitions
         if action.kind == "delete" and current_kind == "insert" and current.actions:
@@ -444,6 +542,42 @@ def _group_into_episodes(
     return episodes
 
 
+def _refine_deletion_types(
+    episodes: list[RevisionEpisode], diagnostics: list[Diagnostic],
+) -> None:
+    """Distinguish likely spelling corrections from changes to unfinished text."""
+    uncertain_count = 0
+    first_uncertain: WritingAction | None = None
+    for index, episode in enumerate(episodes):
+        if not episode.is_revision or not any(a.kind == "delete" for a in episode.actions):
+            continue
+        deleted = episode.deleted_text.strip()
+        following = episodes[index + 1].net_text.lstrip() if index + 1 < len(episodes) else ""
+        replacement = re.match(r"\w+", following)
+        replacement_word = replacement.group(0) if replacement else ""
+        if not deleted or not replacement_word:
+            continue
+
+        same_letter_case_change = deleted.casefold() == replacement_word.casefold()
+        similarity = SequenceMatcher(
+            None, deleted.casefold(), replacement_word.casefold(),
+        ).ratio()
+        if same_letter_case_change or (len(deleted) > 1 and similarity >= 0.7):
+            episode.revision_type_hint = "typo"
+        elif not episode.cursor_moved_back and len(deleted) > 1 and similarity < 0.6:
+            episode.revision_type_hint = "pre-context"
+            uncertain_count += 1
+            if first_uncertain is None:
+                first_uncertain = episode.actions[0]
+    if first_uncertain is not None:
+        diagnostics.append(Diagnostic(
+            event_id=first_uncertain.event.event_id if first_uncertain.event else 0,
+            timestamp=first_uncertain.timestamp,
+            message=f"{uncertain_count} word replacement(s) classified pre-context "
+                    "by heuristic; review intended meaning",
+        ))
+
+
 def _find_parent_node(root: TEINode, start: int, end: int) -> TEINode:
     """Find the deepest node whose position range contains [start, end]."""
     for child in root.children:
@@ -467,19 +601,35 @@ def _episode_pos_range(ep: RevisionEpisode) -> tuple[int, int]:
 
 def _append_episode_content(ep: RevisionEpisode, target: TEINode) -> None:
     if not ep.has_linebreak:
-        target.append(TEINode(kind=NodeKind.TEXT, text=ep.net_text))
+        content = [a for a in ep.actions if a.kind in ("insert", "paste")]
+        positions = (
+            [pos for a in content for pos in a.final_positions]
+            if all(len(a.final_positions) == len(a.text) for a in content) else []
+        )
+        target.append(TEINode(kind=NodeKind.TEXT, text=ep.net_text, positions=positions))
         return
     buf: list[str] = []
+    buf_positions: list[int | None] = []
     for a in ep.actions:
         if a.kind == "linebreak":
             if buf:
-                target.append(TEINode(kind=NodeKind.TEXT, text="".join(buf)))
+                target.append(TEINode(
+                    kind=NodeKind.TEXT, text="".join(buf), positions=buf_positions.copy(),
+                ))
                 buf.clear()
-            target.append(TEINode(kind=NodeKind.LB))
+                buf_positions.clear()
+            target.append(TEINode(
+                kind=NodeKind.LB,
+                final_pos=(a.final_positions[0] if a.final_positions and a.final_positions[0] is not None else -1),
+                positions=a.final_positions.copy(),
+            ))
         elif a.kind == "insert":
             buf.append(a.text)
+            buf_positions.extend(a.final_positions)
     if buf:
-        target.append(TEINode(kind=NodeKind.TEXT, text="".join(buf)))
+        target.append(TEINode(
+            kind=NodeKind.TEXT, text="".join(buf), positions=buf_positions,
+        ))
 
 
 def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
@@ -489,23 +639,52 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
         kind: NodeKind, text: str, rev_type: str, ep: RevisionEpisode,
         start: int = -1, end: int = -1,
     ) -> TEINode:
-        seq = _ms_to_seq(ep.start_time) if ep.start_time else ""
+        seq = _ms_to_seq(ep.start_time) if ep.start_time or any(
+            a.event is not None and a.event.event_type != EventType.REPLACEMENT
+            for a in ep.actions
+        ) else ""
         evidence = _evidence_from_actions(ep.actions)
+        final_positions = [
+            pos for action in ep.actions for pos in action.final_positions if pos is not None
+        ]
+        anchors = [
+            action.final_anchor for action in ep.actions if action.final_anchor is not None
+        ]
+        final_pos = (
+            min(anchors) if kind == NodeKind.DEL and anchors
+            else min(final_positions) if final_positions else start
+        )
         return TEINode(
             kind=kind, text=text, seq=seq, revision_type=rev_type,
-            evidence=evidence, start_pos=start, end_pos=end,
+            evidence=evidence, start_pos=start, end_pos=end, final_pos=final_pos,
         )
 
     def _make_action_node(
         kind: NodeKind, text: str, rev_type: str, action: WritingAction,
         start: int = -1, end: int = -1,
     ) -> TEINode:
-        seq = _ms_to_seq(action.timestamp) if action.timestamp else ""
+        seq = _ms_to_seq(action.timestamp) if (
+            action.timestamp or (
+                action.event is not None
+                and action.event.event_type != EventType.REPLACEMENT
+            )
+        ) else ""
         ev_id = str(action.event.event_id) if action.event else ""
-        return TEINode(
+        node = TEINode(
             kind=kind, text=text, seq=seq, revision_type=rev_type,
             evidence=ev_id, start_pos=start, end_pos=end,
+            final_pos=(
+                action.final_anchor if kind == NodeKind.DEL and action.final_anchor is not None
+                else next((pos for pos in action.final_positions if pos is not None), start)
+            ),
         )
+        if kind == NodeKind.ADD and action.final_positions:
+            node.text = ""
+            node.append(TEINode(
+                kind=NodeKind.TEXT, text=text,
+                positions=action.final_positions.copy(),
+            ))
+        return node
 
     current_add: TEINode | None = None
     current_add_parent: TEINode = root
@@ -534,7 +713,7 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
         # Reclassify: a "revision" episode with only inserts near the leading edge
         # is actually a return to leading edge, not a real revision
         has_only_inserts = all(a.kind in ("insert", "linebreak") for a in ep.actions)
-        is_at_leading_edge = has_only_inserts and abs(ep_start - leading_edge_pos) <= 2
+        is_at_leading_edge = has_only_inserts and ep_start == leading_edge_pos
         treat_as_forward = (not ep.is_revision or has_paste or
                            (ep.is_revision and is_at_leading_edge and edited_away_from_edge))
 
@@ -573,7 +752,7 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                 # Keep base type so next continue is also "nt|continue", not "nt|continue|continue"
                 interrupted_by_inline_typo = False
                 leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
-            elif edited_away_from_edge and had_move_since_last_add and abs(ep_start - leading_edge_pos) <= 2:
+            elif edited_away_from_edge and had_move_since_last_add and ep_start == leading_edge_pos:
                 # Return to leading edge after editing elsewhere → <mod type="continue">
                 node = _make_node(
                     NodeKind.MOD, "", "continue", ep,
@@ -587,15 +766,18 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                 had_move_since_last_add = False
                 edited_away_from_edge = False
                 leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
-            elif current_add is not None and ep_start >= current_add.start_pos and ep_start <= current_add.end_pos + 1 and not follows_revision:
+            elif (current_add is not None and ep_start >= current_add.start_pos
+                  and ep_start <= current_add.end_pos + 1 and not follows_revision
+                  and not ep.force_new_add):
                 # Continuation within current parent — append content
                 _append_episode_content(ep, current_add)
                 current_add.end_pos = max(current_add.end_pos, ep_start + len(text))
                 leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
             elif follows_revision and current_add is not None and had_move_since_last_add:
-                # Return after editing elsewhere → <add type="context">
+                # Continue an insertion after a relocated deletion.
+                previous_type = _classify_revision_type(prev_ep)
                 node = _make_node(
-                    NodeKind.ADD, "", "context", ep,
+                    NodeKind.ADD, "", previous_type, ep,
                     start=ep_start, end=ep_start + len(text),
                 )
                 _append_episode_content(ep, node)
@@ -626,7 +808,7 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
 
             if current_add is not None and ep_start >= current_add.start_pos and ep_end <= current_add.end_pos + 1:
                 target = current_add
-                if rev_type == "typo" and not had_move_since_last_add:
+                if rev_type in ("typo", "pre-context") and not had_move_since_last_add:
                     interrupted_by_inline_typo = True
             else:
                 target = _find_parent_node(root, ep_start, ep_end)
@@ -643,12 +825,12 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                     if a.kind == "replace":
                         if a.deleted_text:
                             target.append(_make_action_node(
-                                NodeKind.DEL, a.deleted_text, "context", a,
+                                NodeKind.DEL, a.deleted_text, rev_type, a,
                                 start=a.position, end=a.position + len(a.deleted_text),
                             ))
                         if a.text:
                             target.append(_make_action_node(
-                                NodeKind.ADD, a.text, "context", a,
+                                NodeKind.ADD, a.text, rev_type, a,
                                 start=a.position, end=a.position + len(a.text),
                             ))
             elif deleted:
@@ -669,15 +851,20 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                         NodeKind.DEL, deleted, rev_type, ep,
                         start=ep_start, end=ep_start + len(deleted),
                     ))
-            elif rev_type == "pre-context" and ep.net_text:
-                # Pre-context: insertion within existing text after cursor relocation
+            elif rev_type in ("pre-context", "context") and ep.net_text:
+                # Insertion within existing text after cursor relocation.
                 text = ep.net_text
                 node = _make_node(
-                    NodeKind.ADD, "", "pre-context", ep,
+                    NodeKind.ADD, "", rev_type, ep,
                     start=ep_start, end=ep_start + len(text),
                 )
                 _append_episode_content(ep, node)
                 target.append(node)
+
+            if ep_start < leading_edge_pos:
+                removed = sum(len(a.deleted_text) for a in ep.actions if a.kind in ("delete", "cut", "replace"))
+                inserted = sum(len(a.text) for a in ep.actions if a.kind in ("insert", "linebreak", "replace"))
+                leading_edge_pos = max(0, leading_edge_pos + inserted - removed)
 
         prev_ep = ep
 
@@ -756,16 +943,59 @@ def _segment_by_sentences(
 
     buckets: list[list[RevisionEpisode]] = [[] for _ in ranges]
 
-    for ep in episodes:
-        ep_start, _ = _episode_pos_range(ep)
-        assigned = False
+    def bucket_index(pos: int) -> int:
         for i, (s, e) in enumerate(ranges):
-            if s <= ep_start < e:
-                buckets[i].append(ep)
-                assigned = True
-                break
-        if not assigned:
-            buckets[-1].append(ep)
+            if s <= pos < e:
+                return i
+        return len(ranges) - 1
+
+    for ep in episodes:
+        if not all(a.kind in ("insert", "linebreak") for a in ep.actions):
+            final_positions = [
+                pos for action in ep.actions for pos in action.final_positions if pos is not None
+            ]
+            anchors = [
+                action.final_anchor for action in ep.actions if action.final_anchor is not None
+            ]
+            ep_start, _ = _episode_pos_range(ep)
+            anchor = min(final_positions or anchors or [ep_start])
+            buckets[bucket_index(anchor)].append(ep)
+            continue
+
+        runs: list[tuple[int, list[WritingAction]]] = []
+        previous_final_pos: int | None = None
+        for action in ep.actions:
+            for offset, char in enumerate(action.text):
+                current_final_pos = (
+                    action.final_positions[offset]
+                    if offset < len(action.final_positions) else None
+                )
+                pos = current_final_pos if current_final_pos is not None else action.position + offset
+                index = bucket_index(pos)
+                gap = (
+                    current_final_pos is not None and previous_final_pos is not None
+                    and (current_final_pos < previous_final_pos or current_final_pos - previous_final_pos > 1)
+                )
+                if not runs or runs[-1][0] != index or gap:
+                    runs.append((index, []))
+                runs[-1][1].append(replace(
+                    action, position=action.position + offset,
+                    text=char,
+                    final_positions=[current_final_pos] if action.final_positions else [],
+                ))
+                if current_final_pos is not None:
+                    previous_final_pos = current_final_pos
+
+        if len(runs) <= 1:
+            index = runs[0][0] if runs else bucket_index(_episode_pos_range(ep)[0])
+            buckets[index].append(ep)
+        else:
+            for run_index, (index, actions) in enumerate(runs):
+                buckets[index].append(replace(
+                    ep, actions=actions, start_time=actions[0].timestamp,
+                    end_time=actions[-1].timestamp,
+                    force_new_add=run_index > 0 and runs[run_index - 1][0] == index,
+                ))
 
     return [b for b in buckets if b]
 
@@ -843,7 +1073,83 @@ def _get_node_text(node: TEINode) -> str:
     return "".join(parts)
 
 
+def _hoist_misplaced_additions(node: TEINode) -> None:
+    for child in list(node.children):
+        _hoist_misplaced_additions(child)
+
+    for child in list(node.children):
+        if child.kind not in (NodeKind.ADD, NodeKind.MOD):
+            continue
+        own_positions = [
+            pos for item in child.children
+            if item.kind in (NodeKind.TEXT, NodeKind.LB)
+            for pos in item.positions if pos is not None
+        ]
+        for nested in list(child.children):
+            if nested.kind not in (NodeKind.ADD, NodeKind.MOD):
+                continue
+            nested_positions = [
+                pos for item in nested.children
+                if item.kind in (NodeKind.TEXT, NodeKind.LB)
+                for pos in item.positions if pos is not None
+            ]
+            anchor = min(nested_positions) if nested_positions else nested.final_pos
+            if not own_positions or anchor < min(own_positions) or anchor > max(own_positions):
+                child.children.remove(nested)
+                node.children.append(nested)
+
+
 def _interleave_text_with_revisions(node: TEINode) -> None:
+    def surviving_positions(parent: TEINode) -> list[int]:
+        positions = [pos for pos in parent.positions if pos is not None]
+        if parent.kind == NodeKind.LB and parent.final_pos >= 0:
+            positions.append(parent.final_pos)
+        for descendant in parent.children:
+            if descendant.kind != NodeKind.DEL:
+                positions.extend(surviving_positions(descendant))
+        return positions
+
+    def effective_pos(child: TEINode) -> int:
+        positions = surviving_positions(child) if child.kind in (NodeKind.ADD, NodeKind.MOD) else []
+        return min(positions) if positions else child.final_pos
+
+    if node.kind in (NodeKind.SEG, NodeKind.ADD, NodeKind.MOD):
+
+        additions = [
+            child for child in node.children if child.kind in (NodeKind.ADD, NodeKind.MOD)
+        ]
+        spans: dict[int, tuple[int, int]] = {}
+        for child in additions:
+            positions = surviving_positions(child)
+            if positions:
+                spans[id(child)] = (min(positions), max(positions))
+        nested_ids: set[int] = set()
+        for child in additions:
+            child_position = effective_pos(child)
+            if child_position < 0:
+                continue
+            child_span = spans.get(id(child), (child_position, child_position))
+            candidates = [
+                parent for parent in additions if parent is not child
+                and id(parent) in spans
+                and spans[id(parent)][0] < child_span[0] <= spans[id(parent)][1]
+                and spans[id(parent)][1] >= child_span[1]
+            ]
+            if candidates:
+                parent = min(
+                    candidates,
+                    key=lambda candidate: child_span[0] - spans[id(candidate)][0],
+                )
+                parent.append(child)
+                nested_ids.add(id(child))
+        node.children = [child for child in node.children if id(child) not in nested_ids]
+        if node.kind == NodeKind.SEG:
+            node.children.sort(key=lambda child: (
+                min(surviving_positions(child))
+                if surviving_positions(child) else effective_pos(child),
+                0 if child.kind == NodeKind.DEL else 1,
+            ))
+
     for child in node.children:
         if child.kind in (NodeKind.ADD, NodeKind.MOD, NodeKind.SEG):
             _interleave_text_with_revisions(child)
@@ -863,27 +1169,43 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
         else:
             unpositioned.append(child)
 
-    if not text_items or not revision_items:
+    positioned = any(item.positions for item in text_items)
+    if not text_items or (not revision_items and not positioned):
         return
 
-    # Build position-indexed buffer: list of (abs_pos, char_or_lb_node)
+    # Build position-indexed buffer from surviving character provenance.
     buf: list[tuple[int, str | TEINode]] = []
     pos = node.start_pos if node.start_pos >= 0 else 0
     for item in text_items:
         if item.kind == NodeKind.TEXT:
-            for ch in item.text:
-                buf.append((pos, ch))
+            for offset, ch in enumerate(item.text):
+                final_pos = (
+                    item.positions[offset]
+                    if positioned and offset < len(item.positions) else pos
+                )
+                if final_pos is not None:
+                    buf.append((final_pos, ch))
                 pos += 1
         elif item.kind == NodeKind.LB:
-            buf.append((pos, item))
+            if positioned and item.positions and item.positions[0] is None:
+                pos += 1
+                continue
+            final_pos = item.final_pos if positioned and item.final_pos >= 0 else pos
+            buf.append((final_pos, item))
             pos += 1
+    if positioned:
+        buf.sort(key=lambda entry: entry[0])
 
     # Sort revisions by position (DEL before ADD at same position)
-    revision_items.sort(key=lambda r: (r.start_pos, 0 if r.kind == NodeKind.DEL else 1))
+    revision_items.sort(key=lambda r: (
+        effective_pos(r) if positioned and effective_pos(r) >= 0 else r.start_pos,
+        0 if r.kind == NodeKind.DEL else 1,
+    ))
 
     # Walk buffer and revisions together
     new_children: list[TEINode] = []
     text_acc: list[str] = []
+    text_positions: list[int] = []
     buf_idx = 0
     rev_idx = 0
 
@@ -893,18 +1215,26 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
             rev = revision_items[rev_idx]
             cur_buf_pos = buf[buf_idx][0] if buf_idx < len(buf) else float("inf")
 
-            if rev.start_pos <= cur_buf_pos:
+            rev_position = effective_pos(rev) if positioned and effective_pos(rev) >= 0 else rev.start_pos
+            if rev_position <= cur_buf_pos:
                 if text_acc:
-                    new_children.append(TEINode(kind=NodeKind.TEXT, text="".join(text_acc)))
+                    new_children.append(TEINode(
+                        kind=NodeKind.TEXT, text="".join(text_acc), positions=text_positions.copy(),
+                    ))
                     text_acc.clear()
+                    text_positions.clear()
 
                 # Collect all revisions at this position
-                rev_pos = rev.start_pos
-                while rev_idx < len(revision_items) and revision_items[rev_idx].start_pos == rev_pos:
+                rev_pos = rev_position
+                while rev_idx < len(revision_items) and (
+                    effective_pos(revision_items[rev_idx])
+                    if positioned and effective_pos(revision_items[rev_idx]) >= 0
+                    else revision_items[rev_idx].start_pos
+                ) == rev_pos:
                     r = revision_items[rev_idx]
                     new_children.append(r)
                     # Skip deleted chars in buffer
-                    if r.kind == NodeKind.DEL:
+                    if r.kind == NodeKind.DEL and not positioned:
                         del_len = len(_get_node_text(r))
                         skipped = 0
                         while skipped < del_len and buf_idx < len(buf):
@@ -918,18 +1248,24 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
                 continue
 
         if buf_idx < len(buf):
-            _, val = buf[buf_idx]
+            buf_pos, val = buf[buf_idx]
             if isinstance(val, str):
                 text_acc.append(val)
+                text_positions.append(buf_pos)
             else:
                 if text_acc:
-                    new_children.append(TEINode(kind=NodeKind.TEXT, text="".join(text_acc)))
+                    new_children.append(TEINode(
+                        kind=NodeKind.TEXT, text="".join(text_acc), positions=text_positions.copy(),
+                    ))
                     text_acc.clear()
+                    text_positions.clear()
                 new_children.append(val)
             buf_idx += 1
 
     if text_acc:
-        new_children.append(TEINode(kind=NodeKind.TEXT, text="".join(text_acc)))
+        new_children.append(TEINode(
+            kind=NodeKind.TEXT, text="".join(text_acc), positions=text_positions,
+        ))
 
     new_children.extend(unpositioned)
     node.children = new_children
@@ -950,6 +1286,43 @@ def _strip_empty_content_nodes(node: TEINode) -> None:
     node.children = [c for c in node.children if not _is_empty_content_node(c)]
 
 
+def _audit_notation(segments: list[TEINode]) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    evidence_seen: set[str] = set()
+
+    def visit(node: TEINode) -> None:
+        if node.kind in (NodeKind.ADD, NodeKind.DEL, NodeKind.MOD):
+            event_id = int(node.evidence.split("-", 1)[0]) if node.evidence else 0
+            if not node.seq:
+                diagnostics.append(Diagnostic(
+                    event_id, 0, "missing @seq; source event has no usable timestamp", "warning",
+                ))
+            if not node.evidence:
+                diagnostics.append(Diagnostic(
+                    event_id, 0, "missing @evidence for writing action", "warning",
+                ))
+            elif node.evidence in evidence_seen:
+                diagnostics.append(Diagnostic(
+                    event_id, 0, f"repeated @evidence={node.evidence}; source event maps to multiple operations",
+                    "warning",
+                ))
+            evidence_seen.add(node.evidence)
+        for child in node.children:
+            visit(child)
+
+    for segment in segments:
+        visit(segment)
+    return diagnostics
+
+
+def _visible_text(node: TEINode) -> str:
+    if node.kind == NodeKind.DEL:
+        return ""
+    if node.kind == NodeKind.LB:
+        return "\n"
+    return node.text + "".join(_visible_text(child) for child in node.children)
+
+
 def convert(
     events: list[Event],
     metadata: SessionMetadata | None = None,
@@ -964,19 +1337,38 @@ def convert(
         actions[i] = WritingAction(
             kind="paste", position=actions[i].position, text=actions[i].text,
             deleted_text="source", event=actions[i].event, timestamp=actions[i].timestamp,
+            context_complete=actions[i].context_complete,
+            final_positions=actions[i].final_positions,
         )
 
     episodes = _group_into_episodes(actions)
+    _refine_deletion_types(episodes, diagnostics)
     segment_groups = _segment_by_sentences(episodes, final_text)
 
     segments: list[TEINode] = []
     for group in segment_groups:
         seg = _build_tei_tree(group)
         if seg.children:
+            _hoist_misplaced_additions(seg)
             _interleave_text_with_revisions(seg)
             _strip_empty_content_nodes(seg)
             if seg.children:
                 segments.append(seg)
+
+    diagnostics.extend(_audit_notation(segments))
+    projected_text = "".join(_visible_text(seg) for seg in segments)
+    if projected_text != final_text:
+        mismatch = next(
+            (i for i, (actual, expected) in enumerate(zip(projected_text, final_text))
+             if actual != expected),
+            min(len(projected_text), len(final_text)),
+        )
+        diagnostics.append(Diagnostic(
+            0, 0,
+            f"TEI reading text differs from replayed text at character {mismatch}; "
+            "review overlapping revisions or lost line breaks",
+            "warning",
+        ))
 
     stats = _compute_stats(events, actions, episodes, segments, diagnostics, parse_warnings)
 

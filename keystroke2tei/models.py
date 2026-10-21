@@ -67,6 +67,8 @@ class TEINode:
     children: list[TEINode] = field(default_factory=list)
     start_pos: int = -1
     end_pos: int = -1
+    final_pos: int = -1
+    positions: list[int | None] = field(default_factory=list)
 
     def append(self, child: TEINode) -> None:
         self.children.append(child)

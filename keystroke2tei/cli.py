@@ -77,11 +77,17 @@ def _process_single(
               f"({s.typed_chars} chars, {s.deletions} dels, "
               f"{s.episodes} episodes, {s.segments} segments)")
 
+        for diagnostic in result.diagnostics:
+            if diagnostic.message.startswith("TEI reading text differs"):
+                print(f"    [warning] {diagnostic.message}", file=sys.stderr)
+
         if verbose:
             if parse_warnings:
                 for w in parse_warnings:
                     print(f"    [parse] {w}", file=sys.stderr)
             for d in result.diagnostics:
+                if d.message.startswith("TEI reading text differs"):
+                    continue
                 print(f"    [{d.level}] event {d.event_id} (t={d.timestamp}): {d.message}",
                       file=sys.stderr)
 
