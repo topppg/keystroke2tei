@@ -635,6 +635,18 @@ def _append_episode_content(ep: RevisionEpisode, target: TEINode) -> None:
 def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
     root = TEINode(kind=NodeKind.SEG, start_pos=0, end_pos=999999)
 
+    def _final_positions_touch(node: TEINode, ep: RevisionEpisode) -> bool:
+        """Do not rejoin typing runs separated by later surviving insertions."""
+        existing = [
+            pos for child in node.children if child.kind in (NodeKind.TEXT, NodeKind.LB)
+            for pos in child.positions if pos is not None
+        ]
+        incoming = [
+            pos for action in ep.actions for pos in action.final_positions
+            if pos is not None
+        ]
+        return not existing or not incoming or min(incoming) == max(existing) + 1
+
     def _make_node(
         kind: NodeKind, text: str, rev_type: str, ep: RevisionEpisode,
         start: int = -1, end: int = -1,
@@ -741,7 +753,10 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                 leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
             elif follows_revision and current_add is not None and not had_move_since_last_add and interrupted_by_inline_typo:
                 # Resume after inline correction → sibling <add type="...|continue">
-                continue_type = f"{current_add_type}|continue"
+                base_type = current_add_type.split("|", 1)[0]
+                if base_type == "continue":
+                    base_type = "nt"
+                continue_type = f"{base_type}|continue"
                 node = _make_node(
                     NodeKind.ADD, "", continue_type, ep,
                     start=ep_start, end=ep_start + len(text),
@@ -768,7 +783,8 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
                 leading_edge_pos = max(leading_edge_pos, ep_start + len(text))
             elif (current_add is not None and ep_start >= current_add.start_pos
                   and ep_start <= current_add.end_pos + 1 and not follows_revision
-                  and not ep.force_new_add):
+                  and not ep.force_new_add
+                  and _final_positions_touch(current_add, ep)):
                 # Continuation within current parent — append content
                 _append_episode_content(ep, current_add)
                 current_add.end_pos = max(current_add.end_pos, ep_start + len(text))
@@ -776,6 +792,8 @@ def _build_tei_tree(episodes: list[RevisionEpisode]) -> TEINode:
             elif follows_revision and current_add is not None and had_move_since_last_add:
                 # Continue an insertion after a relocated deletion.
                 previous_type = _classify_revision_type(prev_ep)
+                if previous_type == "continue":
+                    previous_type = "nt"
                 node = _make_node(
                     NodeKind.ADD, "", previous_type, ep,
                     start=ep_start, end=ep_start + len(text),
@@ -950,6 +968,34 @@ def _segment_by_sentences(
         return len(ranges) - 1
 
     for ep in episodes:
+        # A replacement or paste can insert a whole passage. Divide its
+        # surviving characters between the sentences they occupy in the final
+        # document. The removed text of a replacement stays in its first
+        # sentence; paste source metadata applies to every resulting piece.
+        if len(ep.actions) == 1 and ep.actions[0].kind in ("replace", "paste"):
+            action = ep.actions[0]
+            if action.text and len(action.final_positions) == len(action.text):
+                runs: list[tuple[int, int, int]] = []
+                for offset, final_pos in enumerate(action.final_positions):
+                    index = bucket_index(final_pos if final_pos is not None else action.position + offset)
+                    if not runs or runs[-1][0] != index:
+                        runs.append((index, offset, offset + 1))
+                    else:
+                        previous_index, start, _ = runs[-1]
+                        runs[-1] = (previous_index, start, offset + 1)
+                if len(runs) > 1:
+                    for run_number, (index, start, end) in enumerate(runs):
+                        piece = replace(
+                            action,
+                            position=action.position + start,
+                            text=action.text[start:end],
+                            deleted_text=(action.deleted_text if action.kind == "paste"
+                                          or run_number == 0 else ""),
+                            final_positions=action.final_positions[start:end],
+                        )
+                        buckets[index].append(replace(ep, actions=[piece]))
+                    continue
+
         if not all(a.kind in ("insert", "linebreak") for a in ep.actions):
             final_positions = [
                 pos for action in ep.actions for pos in action.final_positions if pos is not None
@@ -1133,7 +1179,6 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
                 parent for parent in additions if parent is not child
                 and id(parent) in spans
                 and spans[id(parent)][0] < child_span[0] <= spans[id(parent)][1]
-                and spans[id(parent)][1] >= child_span[1]
             ]
             if candidates:
                 parent = min(
@@ -1143,6 +1188,7 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
                 parent.append(child)
                 nested_ids.add(id(child))
         node.children = [child for child in node.children if id(child) not in nested_ids]
+
         if node.kind == NodeKind.SEG:
             node.children.sort(key=lambda child: (
                 min(surviving_positions(child))

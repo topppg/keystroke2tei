@@ -83,6 +83,14 @@ def test_source_markup_has_manual_attributes():
     assert focus.get("seq") == "000001"
     assert focus.get("evidence") == "1"
     assert focus.find("tei:media", namespaces=NS).get("url") == "Chrome"
+    assert focus.find("tei:media", namespaces=NS).get("mimeType") == "Application"
+
+
+def test_focus_name_with_spaces_has_schema_safe_url():
+    root = tree([event(1, "Word Log", 0, 0, EventType.FOCUS)])
+    media = root.xpath(".//tei:media", namespaces=NS)[0]
+    assert media.get("url") == "Word%20Log"
+    assert media.find("tei:desc", namespaces=NS).text == "Word Log"
 
 
 def test_unrepresentable_unique_evidence_is_reported():

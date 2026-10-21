@@ -513,7 +513,7 @@ class TestFocusSource:
         xml = write_tei(result.segments, focus_sources=result.focus_sources)
         assert 'source="sources"' in xml
         assert "<desc>Chrome</desc>" in xml
-        assert '<media url="Chrome">' in xml
+        assert '<media url="Chrome" mimeType="Application">' in xml
 
 
 # --- Episode grouping ---

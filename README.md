@@ -46,8 +46,14 @@ Each `<del>` shows exactly what the writer typed and then deleted. `@seq` gives 
 The converter trusts **CSV positions as absolute truth**. It uses a position-indexed character map (`CharMap`) that only tracks characters explicitly seen in the log. Autocomplete/spellcheck insertions are tracked as unknown (`None`) rather than guessed.
 
 Validated against:
-- 4,992 KLiCKe CSV files and 4,992 corresponding IDFX files: all converted without exceptions; the TEI reading text matched the replayed text in 4,906 CSV and 4,860 IDFX files. The remaining files emit a warning for editorial review.
+- 4,992 KLiCKe CSV files and 4,992 corresponding IDFX files: all converted without exceptions, and all 9,984 TEI reading texts matched the replayed texts. Source-attribute and editorial review findings remain.
 - 1 Inputlog CSV and 4 TEIoKEY HTML files: all converted with matching reading text.
+
+All 9,984 KLiCKe outputs pass the bundled TEI schema. The Loxensis audit found
+176 repeated-evidence warnings in CSV output. In IDFX output it found 94,839
+operations without a source-derived `@seq` and 29,664 repeated-evidence
+warnings. These counts describe operations, not files; the IDFX source does not
+record timestamps for many replacement events.
 
 ## Installation
 
@@ -80,6 +86,24 @@ uv run keystroke2tei data/input/ -o data/output/ -v --stats
 
 - `-v` prints diagnostics, including cases that need editorial review
 - `--stats` writes a JSON sidecar per file with conversion statistics
+
+### Validate and prepare editorial review
+
+```bash
+uv run keystroke2tei data/input/doc.csv -o data/output/ --validate --review-report
+uv run keystroke2tei data/input/doc.csv -o data/output/ --validate --review-report --overrides data/input/doc.overrides.json
+```
+
+`--validate` checks the output against the bundled TEI P5 4.12.0 Relax NG schema
+and machine-checkable Loxensis rules. Validation errors and reading-text
+mismatches give the command a nonzero exit status; the XML is still written
+for inspection. Warnings, such as
+evidence IDs reused by paired replacement operations, are shown but do not fail
+the command. `--review-report` writes `<name>.review.json` beside the TEI file.
+For batch conversion, `--overrides` can name a directory containing
+`<input-stem>.overrides.json` files.
+The bundled schema is from the TEI Consortium; its license is in
+`keystroke2tei/schemas/LICENSE-TEI.md`.
 
 ### Python API
 
@@ -114,7 +138,9 @@ keystroke2tei/
 │   ├── converter.py        # CharMap, event replay, episode grouping, TEI tree
 │   ├── writer.py           # TEI XML serialization via lxml
 │   ├── models.py           # Event, TEINode, Diagnostic, ConversionStats
-│   └── cli.py              # CLI (single/batch/verbose/stats)
+│   ├── validation.py       # TEI schema and Loxensis rule checks
+│   ├── review.py           # editorial report and explicit overrides
+│   └── cli.py              # conversion, validation, and review CLI
 ├── data/
 │   ├── input/              # Drop your CSV/IDFX files here
 │   └── corpora/            # Test corpus files (KLiCKe, THEtool)
@@ -151,12 +177,62 @@ This tool follows the [Keystroke Loxensis](https://extant-cmg.github.io/eXtant-w
 - `context` — edit to an already completed sentence
 - `pre-context` — edit made before the sentence was complete
 
+## Editorial review
+
+The conversion result can be inspected as a JSON review report. It lists inferred
+revision types, every boundary between `<seg>` elements, missing `@seq`, `@type`,
+or `@evidence`, repeated evidence values, and any difference between the TEI
+reading text and the replayed text. These are review prompts, not proof that a
+particular interpretation is wrong. The [Loxensis additions manual](https://extant-cmg.github.io/eXtant-wiki/loxensis/encoding/additions/)
+requires `@seq`, `@type`, and `@evidence` on `<add>` and treats the distinction
+between `typo`, `pre-context`, and `context` as an editorial classification.
+
+```python
+import json
+from keystroke2tei.review import apply_overrides, build_review_report, load_overrides
+from keystroke2tei.writer import write_tei
+
+# `result` is a ConversionResult returned by convert(...).
+report = build_review_report(result)
+with open("review.json", "w", encoding="utf-8") as file:
+    json.dump(report, file, indent=2, ensure_ascii=False)
+
+apply_overrides(result, load_overrides("overrides.json"))
+tei = write_tei(result.segments, result.metadata, result.focus_sources)
+updated_report = build_review_report(result)
+```
+
+Copy a node's `target` from the report into an override file. The source
+`kind`, `evidence`, and `occurrence` identify the operation; `path` locates an
+operation when its evidence is missing. A stale target raises an error rather
+than editing a different node. All entries are checked before any change is
+applied.
+
+```json
+{
+  "format_version": 1,
+  "overrides": [
+    {
+      "target": {"kind": "add", "evidence": "2", "occurrence": 0, "path": [0, 0, 1]},
+      "set": {"seq": "000002", "revision_type": "typo"}
+    }
+  ]
+}
+```
+
+`set` accepts `revision_type` (serialized as `@type`), `seq`, and `evidence`.
+Supply values only when the source log or editorial evidence supports them.
+Structural decisions such as moving a sentence boundary or resolving crossing
+revisions still require inspection and editing of the TEI XML. The report's
+`source_diagnostics` retain the original conversion warnings even after an
+override; the `issues` list is recalculated from the current tree.
+
 ## Known limitations
 
 - **Deleted text from autocomplete is empty.** When a backspace deletes a character inserted by autocomplete (not by the writer), the `<del>` element has empty text. By design.
 - **Sentence detection is heuristic.** The final-text punctuation rule can split abbreviations or miss unusual sentence boundaries. Review `<seg>` boundaries in complex sessions.
 - **Editorial types are inferred.** Keystroke order and cursor position cannot establish a writer's intent. In particular, distinguishing a spelling correction from a word choice change requires review. The converter reports uncertain word replacements.
-- **Overlapping revisions can resist tree encoding.** Some crossing insertions cannot be represented as nested XML without splitting a revision. The converter reports when the TEI reading text differs from replayed text; review those files before using them as editions.
+- **Overlapping revisions can resist tree encoding.** Some crossing insertions require an operation to be split into multiple XML elements. That can repeat its source `@evidence`; the validator and review report flag this. The converter also reports any reading-text mismatch found in new input.
 - **Source attributes may be incomplete.** Some IDFX replacement events lack a timestamp, so `@seq` cannot be derived. A single replacement can create both `<del>` and `<add>` with the same source event ID; the converter reports the repeated `@evidence` instead of inventing an identifier.
 - **Deep nesting is heuristic.** Complex edits may need manual adjustment.
 
@@ -170,8 +246,6 @@ The corpus figures above measure conversion and text fidelity. They do not certi
 
 ## Next steps
 
-- TEI RelaxNG schema validation of output
-- Editorial review workflow for ambiguous classifications and overlapping revisions
 - Multi-session linking (`<linkGrp>`)
 - Richer `<teiHeader>` (duration, start time, `<respStmt>`)
 - JSON/flat export format
