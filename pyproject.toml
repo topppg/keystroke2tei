@@ -23,6 +23,9 @@ keystroke2tei = "keystroke2tei.cli:main"
 [tool.setuptools.packages.find]
 include = ["keystroke2tei*"]
 
+[tool.setuptools.package-data]
+keystroke2tei = ["prompts/*.j2"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from keystroke2tei.converter import CharMap, RevisionEpisode, WritingAction, _classify_key, _process_events, _group_into_episodes, convert, _build_tei_tree, _deduplicate_seq, _interleave_text_with_revisions, _segment_by_sentences, _find_sentence_ranges
+from keystroke2tei.converter import CharMap, RevisionEpisode, WritingAction, _classify_key, _process_events, _group_into_episodes, convert, _build_tei_tree, _interleave_text_with_revisions, _segment_by_sentences, _find_sentence_ranges
 from keystroke2tei.models import Event, EventType, NodeKind, TEINode
 
 
@@ -574,48 +574,18 @@ class TestEndToEnd:
         assert result.stats.total_events > 0
 
 
-class TestDeduplicateSeq:
-    def test_no_collision(self):
-        nodes = [
-            TEINode(kind=NodeKind.ADD, seq="000100"),
-            TEINode(kind=NodeKind.ADD, seq="000200"),
+class TestTimestampSeq:
+    def test_same_second_keeps_event_time(self):
+        events = [
+            _kb(1, "a", 0, 0, 100),
+            _kb(2, "b", 1, 1, 200),
+            _kb(3, "BACK", 2, 2, 300),
+            _kb(4, "c", 1, 1, 400),
         ]
-        seg = TEINode(kind=NodeKind.SEG, children=nodes)
-        _deduplicate_seq([seg])
-        assert nodes[0].seq == "000100"
-        assert nodes[1].seq == "000200"
-
-    def test_same_second_incremented(self):
-        nodes = [
-            TEINode(kind=NodeKind.ADD, seq="000100"),
-            TEINode(kind=NodeKind.ADD, seq="000100"),
-            TEINode(kind=NodeKind.ADD, seq="000100"),
-        ]
-        seg = TEINode(kind=NodeKind.SEG, children=nodes)
-        _deduplicate_seq([seg])
-        assert nodes[0].seq == "000100"
-        assert nodes[1].seq == "000101"
-        assert nodes[2].seq == "000102"
-
-    def test_cascade_collision(self):
-        nodes = [
-            TEINode(kind=NodeKind.ADD, seq="000100"),
-            TEINode(kind=NodeKind.ADD, seq="000100"),
-            TEINode(kind=NodeKind.DEL, seq="000101"),
-        ]
-        seg = TEINode(kind=NodeKind.SEG, children=nodes)
-        _deduplicate_seq([seg])
-        assert nodes[0].seq == "000100"
-        assert nodes[1].seq == "000101"
-        assert nodes[2].seq == "000102"  # cascaded from nodes[1] taking 000101
-
-    def test_nested_nodes(self):
-        child = TEINode(kind=NodeKind.DEL, seq="000500")
-        parent = TEINode(kind=NodeKind.ADD, seq="000500", children=[child])
-        seg = TEINode(kind=NodeKind.SEG, children=[parent])
-        _deduplicate_seq([seg])
-        assert parent.seq == "000500"
-        assert child.seq == "000501"
+        result = convert(events)
+        nodes = [node for seg in result.segments for node in seg.children]
+        assert [node.seq for node in nodes] == ["000000", "000000"]
+        assert nodes[0].children[-1].seq == "000000"
 
 
 class TestInterleaveTextWithRevisions:

@@ -133,10 +133,18 @@ def main() -> None:
         print("No CSV files found.", file=sys.stderr)
         sys.exit(1)
 
+    if len(csv_files) > 1 and args.output is not None and (
+        args.output.is_file() or (not args.output.exists() and bool(args.output.suffix))
+    ):
+        parser.error("multiple inputs require an output directory")
+
+    out_paths = [_resolve_output(path, args.output) for path in csv_files]
+    if len(set(out_paths)) != len(out_paths):
+        parser.error("multiple inputs would write to the same output file")
+
     ok = 0
     fail = 0
-    for csv_path in csv_files:
-        out_path = _resolve_output(csv_path, args.output)
+    for csv_path, out_path in zip(csv_files, out_paths):
         if _process_single(csv_path, out_path, args.verbose, args.stats, args.classify):
             ok += 1
         else:

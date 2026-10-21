@@ -935,45 +935,19 @@ def _interleave_text_with_revisions(node: TEINode) -> None:
     node.children = new_children
 
 
-def _is_whitespace_only(node: TEINode) -> bool:
+def _is_empty_content_node(node: TEINode) -> bool:
     if node.kind not in (NodeKind.ADD, NodeKind.DEL):
         return False
     if any(c.kind not in (NodeKind.TEXT,) for c in node.children):
         return False
     all_text = (node.text or "") + "".join(c.text for c in node.children if c.kind == NodeKind.TEXT)
-    return not all_text or all_text.isspace()
+    return not all_text
 
 
-def _strip_whitespace_only_nodes(node: TEINode) -> None:
+def _strip_empty_content_nodes(node: TEINode) -> None:
     for child in node.children:
-        _strip_whitespace_only_nodes(child)
-    node.children = [c for c in node.children if not _is_whitespace_only(c)]
-
-
-def _deduplicate_seq(segments: list[TEINode]) -> None:
-    """Ensure all @seq values are unique by incrementing same-second collisions."""
-    nodes: list[TEINode] = []
-
-    def _collect(node: TEINode) -> None:
-        if node.seq:
-            nodes.append(node)
-        for child in node.children:
-            _collect(child)
-
-    for seg in segments:
-        _collect(seg)
-
-    used: set[str] = set()
-    for node in nodes:
-        if node.seq not in used:
-            used.add(node.seq)
-            continue
-        h, m, s = int(node.seq[0:2]), int(node.seq[2:4]), int(node.seq[4:6])
-        total_s = h * 3600 + m * 60 + s
-        while node.seq in used:
-            total_s += 1
-            node.seq = f"{total_s // 3600:02d}{(total_s % 3600) // 60:02d}{total_s % 60:02d}"
-        used.add(node.seq)
+        _strip_empty_content_nodes(child)
+    node.children = [c for c in node.children if not _is_empty_content_node(c)]
 
 
 def convert(
@@ -1000,10 +974,9 @@ def convert(
         seg = _build_tei_tree(group)
         if seg.children:
             _interleave_text_with_revisions(seg)
-            _strip_whitespace_only_nodes(seg)
-            segments.append(seg)
-
-    _deduplicate_seq(segments)
+            _strip_empty_content_nodes(seg)
+            if seg.children:
+                segments.append(seg)
 
     stats = _compute_stats(events, actions, episodes, segments, diagnostics, parse_warnings)
 
