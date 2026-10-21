@@ -6,6 +6,7 @@ from keystroke2tei.converter import (
     RevisionEpisode,
     WritingAction,
     _build_tei_tree,
+    _find_sentence_ranges,
     _segment_by_sentences,
     _visible_text,
     convert,
@@ -30,6 +31,13 @@ def test_replacement_text_is_assigned_to_each_final_sentence() -> None:
     assert "".join(_visible_text(seg) for seg in result.segments) == result.final_text
     assert len(result.segments) == 2
     assert not any("TEI reading text differs" in d.message for d in result.diagnostics)
+
+
+def test_acronym_before_lowercase_word_does_not_end_sentence() -> None:
+    text = "U.S. citizens work here. They return."
+    assert [text[start:end] for start, end in _find_sentence_ranges(text)] == [
+        "U.S. citizens work here. ", "They return.",
+    ]
 
 
 def test_replacement_split_preserves_deleted_text_only_once() -> None:

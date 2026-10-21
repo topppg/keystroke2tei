@@ -940,6 +940,13 @@ def _find_sentence_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     start = 0
     for m in _SENTENCE_END.finditer(text):
+        # An acronym followed by a lowercase word is still inside the same
+        # sentence (for example, "U.S. citizens"). Its final dot looks like
+        # sentence punctuation to the general boundary expression.
+        if m.group().startswith(".") and re.search(r"(?:\b[A-Z]\.)+[A-Z]$", text[:m.start()]):
+            following = text[m.end():].lstrip()
+            if following and following[0].islower():
+                continue
         end = m.end()
         ranges.append((start, end))
         start = end

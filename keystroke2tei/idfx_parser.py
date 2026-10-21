@@ -85,6 +85,31 @@ def _idfx_key_to_output(key: str, value: str) -> str:
     return name
 
 
+def _pre_key_state(key: str, output: str, position: int, doclength: int) -> tuple[int, int]:
+    """Convert Wordlog's post-key cursor and length to pre-key values.
+
+    The converter replays a keystroke at its pre-key cursor. Inputlog IDFX
+    records the cursor and document length after the key has taken effect.
+    Navigation and modifier keys do not change either value.
+    """
+    if output == "BACK":
+        return position + 1, doclength + 1
+    if output == "DELETE":
+        return position, doclength + 1
+    if output in {"SPACE", "RETURN", "TAB"}:
+        width = 1
+    elif key in {"VK_LEFT", "VK_RIGHT", "VK_UP", "VK_DOWN", "VK_HOME", "VK_END",
+                 "VK_PRIOR", "VK_NEXT", "VK_SHIFT", "VK_LSHIFT", "VK_RSHIFT",
+                 "VK_CONTROL", "VK_LCONTROL", "VK_RCONTROL", "VK_CAPITAL",
+                 "VK_ESCAPE", "VK_INSERT"} or (key.startswith("VK_F") and key[4:].isdigit()):
+        width = 0
+    elif output.isprintable() and output not in {"UNKNOWN", "MODIFIER"}:
+        width = len(output)
+    else:
+        width = 0
+    return max(0, position - width), max(0, doclength - width)
+
+
 def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
     events: list[Event] = []
     warnings: list[str] = []
@@ -141,6 +166,7 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                 end_time = _int(winlog.find("endTime") if winlog is not None else None)
 
                 output = _idfx_key_to_output(key_name, value)
+                position, doclength = _pre_key_state(key_name, output, position, doclength)
 
                 events.append(Event(
                     event_type=EventType.KEYBOARD,
