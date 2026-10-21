@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from lxml import etree
 
+from keystroke2tei.converter import FocusEvent, _ms_to_seq
 from keystroke2tei.models import NodeKind, SessionMetadata, TEINode
 
 
@@ -78,7 +79,7 @@ def _build_header(metadata: SessionMetadata | None = None) -> etree._Element:
 def write_tei(
     segments: list[TEINode],
     metadata: SessionMetadata | None = None,
-    focus_sources: list[object] | None = None,
+    focus_sources: list[FocusEvent] | None = None,
 ) -> str:
     root = etree.Element("TEI", nsmap=NSMAP)
 
@@ -87,7 +88,7 @@ def write_tei(
 
     text = etree.SubElement(root, "text")
     body = etree.SubElement(text, "body")
-    p = etree.SubElement(body, "p")
+    p = etree.SubElement(body, "p", source="keystrokes")
 
     for seg_node in segments:
         _node_to_xml(seg_node, p)
@@ -95,14 +96,16 @@ def write_tei(
     if focus_sources:
         p_sources = etree.SubElement(body, "p", source="sources")
         for fe in focus_sources:
-            add_el = etree.SubElement(p_sources, "add", type="focus")
-            add_el.set("evidence", str(fe.event_id))  # type: ignore[union-attr]
-            media_el = etree.SubElement(add_el, "media")
+            add_el = etree.SubElement(
+                p_sources, "add", seq=_ms_to_seq(fe.timestamp),
+                type="focus", evidence=str(fe.event_id),
+            )
+            media_el = etree.SubElement(add_el, "media", url=fe.app_name)
             desc_el = etree.SubElement(media_el, "desc")
-            desc_el.text = fe.app_name  # type: ignore[union-attr]
+            desc_el.text = fe.app_name
 
     return etree.tostring(
         root,
-        pretty_print=True,
+        pretty_print=False,
         encoding="unicode",
     )

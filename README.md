@@ -19,16 +19,12 @@ Researchers need this data in **TEI XML** format — a structured representation
 
 - **Inline corrections** — each typo fix appears as `<del>` nested inside the flowing text
 - **Flowing text** — one `<add>` per writing burst with inline `<del>` markers, not fragmented elements
-- **Loxensis type classification**:
-  - `type="nt"` — new text production
-  - `type="typo"` — inline backspace correction (no cursor relocation)
-  - `type="context"` — revision in already-written text (cursor relocated via mouse click)
-  - `type="pre-context"` — insertion before sentence completion
+- **Loxensis type classification**: `nt` for new text, `typo` for likely spelling corrections, `context` for edits to a completed sentence, and `pre-context` for edits before completion
 - **`@seq` as timestamp** — `hhmmss` format from the event's start time
 - **`@evidence` as event ID** — single ID or range (e.g. `"380-398"`) linking back to the raw log
-- **Segment grouping** (`<seg>`) based on pauses, sentence boundaries, and cursor jumps
+- **Sentence segments** (`<seg>`) based on the replayed final text
 - **`<teiHeader>`** populated from session metadata (participant, language, date)
-- **Diagnostics** — structured warnings for autocomplete drift, unknown deletions, skipped events
+- **Diagnostics** — structured warnings for autocomplete drift, unknown deletions, missing source attributes, and mismatches between the TEI reading text and replayed text
 
 ### Example output
 
@@ -50,9 +46,8 @@ Each `<del>` shows exactly what the writer typed and then deleted. `@seq` gives 
 The converter trusts **CSV positions as absolute truth**. It uses a position-indexed character map (`CharMap`) that only tracks characters explicitly seen in the log. Autocomplete/spellcheck insertions are tracked as unknown (`None`) rather than guessed.
 
 Validated against:
-- 22 IDFX files from the [THEtool corpus](https://github.com/mulasik/wta) (German academic writing)
-- 9 CSVs from the [KLiCKe Corpus](https://github.com/terryyutian/KLiCKe-Corpus) (~5000 English essays)
-- 1 Inputlog CSV (French literary writing)
+- 4,992 KLiCKe CSV files and 4,992 corresponding IDFX files: all converted without exceptions; the TEI reading text matched the replayed text in 4,906 CSV and 4,860 IDFX files. The remaining files emit a warning for editorial review.
+- 1 Inputlog CSV and 4 TEIoKEY HTML files: all converted with matching reading text.
 
 ## Installation
 
@@ -83,7 +78,7 @@ uv run keystroke2tei data/input/ -o data/output/
 uv run keystroke2tei data/input/ -o data/output/ -v --stats
 ```
 
-- `-v` prints per-event diagnostics (autocomplete drift, unknown deletions, skipped keys)
+- `-v` prints diagnostics, including cases that need editorial review
 - `--stats` writes a JSON sidecar per file with conversion statistics
 
 ### Python API
@@ -136,7 +131,7 @@ keystroke2tei/
 2. **Replay** — Process events using a `CharMap` (position -> character). CSV positions are absolute truth. Unknown characters (autocomplete) are `None`.
 3. **Split** — Split actions at every insert/delete transition. Each contiguous typing run or deletion run becomes its own episode.
 4. **Classify** — Label episodes per [Loxensis conventions](https://extant-cmg.github.io/eXtant-wiki/loxensis/encoding/additions): `typo` for inline backspace corrections, `context` for cursor-relocated revisions, `nt` for new text.
-5. **Segment** — Group episodes into `<seg>` elements based on pauses (>5s), sentence boundaries, or large cursor jumps.
+5. **Segment** — Assign surviving actions to sentence `<seg>` elements using the replayed final text.
 6. **Build tree** — Nest `<del>` elements inside parent `<add>` nodes. Continuation text flows as inline text within the parent.
 7. **Serialize** — Write valid TEI XML with `@seq` (timestamp), `@evidence` (event ID range), and TEI namespace.
 
@@ -152,17 +147,20 @@ This tool follows the [Keystroke Loxensis](https://extant-cmg.github.io/eXtant-w
 
 **Type classification rules:**
 - `nt` — new text production (forward typing)
-- `typo` — immediate backspace correction without cursor relocation
-- `context` — revision in already-written text after cursor relocation (mouse click)
-- `pre-context` — insertion before sentence completion, cursor not relocated
+- `typo` — likely spelling or case correction, including some relocated edits
+- `context` — edit to an already completed sentence
+- `pre-context` — edit made before the sentence was complete
 
 ## Known limitations
 
 - **Deleted text from autocomplete is empty.** When a backspace deletes a character inserted by autocomplete (not by the writer), the `<del>` element has empty text. By design.
-- **Segmentation is heuristic.** Based on time gaps, sentence endings, and cursor jumps. May need manual adjustment for complex sessions.
-- **IDFX replacement events have no recorded timestamp.** They retain their event order, but cannot receive a time-derived `@seq`.
-- **No `nt|continue` or `context|continue` pipe types yet.** The Loxensis spec supports compound types for interrupted continuations. Currently, continuation text flows as inline text without explicit type markup.
-- **No deep nesting.** Revisions within revisions are supported but deeply recursive patterns may flatten.
+- **Sentence detection is heuristic.** The final-text punctuation rule can split abbreviations or miss unusual sentence boundaries. Review `<seg>` boundaries in complex sessions.
+- **Editorial types are inferred.** Keystroke order and cursor position cannot establish a writer's intent. In particular, distinguishing a spelling correction from a word choice change requires review. The converter reports uncertain word replacements.
+- **Overlapping revisions can resist tree encoding.** Some crossing insertions cannot be represented as nested XML without splitting a revision. The converter reports when the TEI reading text differs from replayed text; review those files before using them as editions.
+- **Source attributes may be incomplete.** Some IDFX replacement events lack a timestamp, so `@seq` cannot be derived. A single replacement can create both `<del>` and `<add>` with the same source event ID; the converter reports the repeated `@evidence` instead of inventing an identifier.
+- **Deep nesting is heuristic.** Complex edits may need manual adjustment.
+
+The corpus figures above measure conversion and text fidelity. They do not certify every inferred revision type or sentence boundary; those remain editorial decisions.
 
 ## References
 
@@ -173,8 +171,7 @@ This tool follows the [Keystroke Loxensis](https://extant-cmg.github.io/eXtant-w
 ## Next steps
 
 - TEI RelaxNG schema validation of output
-- Full `nt|continue` and `context|continue` pipe types
-- `<mod type="continue">` for returns to the leading edge
+- Editorial review workflow for ambiguous classifications and overlapping revisions
 - Multi-session linking (`<linkGrp>`)
 - Richer `<teiHeader>` (duration, start time, `<respStmt>`)
 - JSON/flat export format

@@ -415,7 +415,10 @@ class TestPreContext:
         from keystroke2tei.converter import _classify_revision_type, RevisionEpisode, WritingAction
         # Simulate: cursor moved back, has delete → context
         ep = RevisionEpisode(is_revision=True, cursor_moved_back=True)
-        ep.actions.append(WritingAction(kind="delete", position=5, deleted_text="x", timestamp=100))
+        ep.actions.append(WritingAction(
+            kind="delete", position=5, deleted_text="x", timestamp=100,
+            context_complete=True,
+        ))
         assert _classify_revision_type(ep) == "context"
 
     def test_precontext_e2e(self):
@@ -510,7 +513,7 @@ class TestFocusSource:
         xml = write_tei(result.segments, focus_sources=result.focus_sources)
         assert 'source="sources"' in xml
         assert "<desc>Chrome</desc>" in xml
-        assert "<media>" in xml
+        assert '<media url="Chrome">' in xml
 
 
 # --- Episode grouping ---
