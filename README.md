@@ -45,9 +45,13 @@ Each `<del>` shows exactly what the writer typed and then deleted. `@seq` gives 
 ### Architecture
 
 The converter replays actions at their pre-event cursor position. The KLiCKe
-CSV and IDFX parsers normalize recorded post-key positions before replay.
+CSV parser and older Wordlog 7 IDFX logs normalize recorded post-key positions.
+Wordlog 9 IDFX logs already record pre-key positions and document lengths.
 For IDFX, an OEM key with no recorded character is treated as a non-text key;
-the key name is not inserted into the document. When the log supplies both
+the key name is not inserted into the document. On French layouts, an empty
+`VK_OEM_6` dead key composes with the following vowel. IDFX events marked
+`replay=False` are represented by their following replacement event; selection
+snapshots do not create text. When the log supplies both
 `__LogCreationDate` and `__LogRelativeCreationDate`, event times are anchored
 to the recorded local clock, including sessions crossing midnight.
 A position-indexed character map (`CharMap`)
@@ -96,6 +100,24 @@ uv run keystroke2tei data/input/ -o data/output/ -v --stats
 
 - `-v` prints diagnostics, including cases that need editorial review
 - `--stats` writes a JSON sidecar per file with conversion statistics
+
+For an IDFX file with its Inputlog replay HTML, supply the replay to recover
+deleted text from the starting document and check surviving typed text against
+the replay independently:
+
+```bash
+uv run keystroke2tei session.idfx -o session.tei.xml \
+  --replay-html replay_session.html --review-report
+```
+
+The review report includes `replay_comparison` with the match result and edit
+counts. A final-text mismatch is printed as a warning; `--validate` also makes
+it a conversion error.
+
+`--classify` makes an optional model call only for editorial revision labels.
+Text reconstruction and replay checks stay deterministic. The classifier sees
+candidate edits in source-action order with a short snapshot of the document
+immediately before each edit; its labels remain subject to editorial review.
 
 ### Validate and prepare editorial review
 
@@ -244,6 +266,9 @@ override; the `issues` list is recalculated from the current tree.
 - **Editorial types are inferred.** Keystroke order and cursor position cannot establish a writer's intent. In particular, distinguishing a spelling correction from a word choice change requires review. The converter reports uncertain word replacements.
 - **Overlapping revisions can resist tree encoding.** Some crossing insertions require an operation to be split into multiple XML elements. That can repeat its source `@evidence`; the validator and review report flag this. The converter also reports any reading-text mismatch found in new input.
 - **Source attributes may be incomplete.** Some IDFX replacement events lack a timestamp, so `@seq` cannot be derived. A single replacement can create both `<del>` and `<add>` with the same source event ID; the converter reports the repeated `@evidence` instead of inventing an identifier.
+- **Starting-document deletions require a baseline.** Use `--replay-html` when
+  available to recover the exact text removed from the document that existed
+  before logging began.
 - **Deep nesting is heuristic.** Complex edits may need manual adjustment.
 
 The corpus figures above measure conversion and text fidelity. They do not certify every inferred revision type or sentence boundary; those remain editorial decisions.

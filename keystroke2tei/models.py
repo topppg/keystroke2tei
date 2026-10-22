@@ -36,6 +36,7 @@ class Event:
     doclength: int
     x: int | None = None
     y: int | None = None
+    replay: bool = True
 
 
 class RevisionType(Enum):

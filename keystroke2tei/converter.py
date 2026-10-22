@@ -14,7 +14,7 @@ IGNORED_KEYS = {"CAPSLOCK", "NUMLOCK", "SCROLL", "INSERT", "ESCAPE", "PRINT", "P
                 "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
                 "LCTRL", "RCTRL", "LALT", "RALT", "LSHIFT", "RSHIFT"}
 MODIFIER_PATTERN = re.compile(r"^(LCTRL|RCTRL|LALT|RALT|LSHIFT|RSHIFT)\s*\+")
-REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\]\s*(.*)")
+REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\] (.*)")
 
 
 def _ms_to_seq(ms: int) -> str:
@@ -64,6 +64,7 @@ class WritingAction:
     event: Event | None = None
     timestamp: int = 0
     context_complete: bool = False
+    context_at_edit: str = ""
     final_positions: list[int | None] = field(default_factory=list)
     final_anchor: int | None = None
 
@@ -133,6 +134,13 @@ class CharMap:
 
     def get_text(self) -> str:
         return "".join(c for c in self._chars if c is not None)
+
+    def context_at(self, pos: int, width: int = 50) -> str:
+        """Text surrounding a cursor immediately before a writing action."""
+        pos = max(0, min(pos, self.length))
+        left = "".join(ch if ch is not None else "□" for ch in self._chars[max(0, pos - width):pos])
+        right = "".join(ch if ch is not None else "□" for ch in self._chars[pos:pos + width])
+        return f"{left}|{right}"
 
     def sentence_complete_at(self, pos: int) -> bool:
         """Whether the sentence at pos already has closing punctuation."""
@@ -211,8 +219,11 @@ def _classify_key(output: str) -> str:
     return "UNKNOWN"
 
 
-def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list[Diagnostic]]:
-    cmap = CharMap()
+def _process_events(
+    events: list[Event], initial_text: str = "",
+    document_out: list[str] | None = None,
+) -> tuple[list[WritingAction], str, list[Diagnostic]]:
+    cmap = CharMap(_chars=list(initial_text), _origins=[None] * len(initial_text))
     actions: list[WritingAction] = []
     diagnostics: list[Diagnostic] = []
     prev_cursor = 0
@@ -237,6 +248,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
             if pending_clipboard_op == "CTRL+X":
                 cut_len = max(0, cmap.length - ev.doclength)
                 cut_text = ""
+                cut_context = cmap.context_at(pending_clipboard_cursor)
                 for _ in range(cut_len):
                     if pending_clipboard_cursor < cmap.length:
                         ch = cmap.delete(pending_clipboard_cursor)
@@ -247,6 +259,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         kind="cut", position=pending_clipboard_cursor,
                         deleted_text=cut_text, event=pending_clipboard_ev,
                         timestamp=pending_clipboard_ev.start_time,
+                        context_at_edit=cut_context,
                     )
                     cmap.mark_deleted(cut_action)
                     actions.append(cut_action)
@@ -269,6 +282,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         kind="paste", position=pending_clipboard_cursor,
                         text=paste_text, event=pending_clipboard_ev,
                         timestamp=pending_clipboard_ev.start_time,
+                        context_at_edit=cmap.context_at(pending_clipboard_cursor),
                         final_positions=[None] * len(paste_text),
                     )
                     for i, ch in enumerate(paste_text):
@@ -310,6 +324,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         kind="replace", position=start, text=new_text,
                         deleted_text=old_text, event=ev, timestamp=ev.start_time,
                         context_complete=context_complete,
+                        context_at_edit=cmap.context_at(start),
                         final_positions=[None] * len(new_text),
                     )
                     cmap.replace_range(start, end, new_text, replace_action)
@@ -323,6 +338,8 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
             continue
 
         if ev.event_type == EventType.KEYBOARD:
+            if not ev.replay:
+                continue
             key = _classify_key(ev.output)
 
             # GA format: bare modifier followed by X/C/V
@@ -345,6 +362,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                 del_pos = cursor - 1
                 if del_pos >= 0:
                     deleted_sentence_complete = cmap.sentence_complete_at(del_pos)
+                    context_at_edit = cmap.context_at(del_pos)
                     deleted = cmap.delete(del_pos)
                     if not deleted:
                         diagnostics.append(Diagnostic(
@@ -356,11 +374,13 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         kind="delete", position=del_pos,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
                         context_complete=deleted_sentence_complete,
+                        context_at_edit=context_at_edit,
                     )
                     cmap.mark_deleted(delete_action)
                     actions.append(delete_action)
             elif key == "DELETE":
                 if cursor < cmap.length:
+                    context_at_edit = cmap.context_at(cursor)
                     deleted = cmap.delete(cursor)
                     if not deleted:
                         diagnostics.append(Diagnostic(
@@ -372,6 +392,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                         kind="delete", position=cursor,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
                         context_complete=context_complete,
+                        context_at_edit=context_at_edit,
                     )
                     cmap.mark_deleted(delete_action)
                     actions.append(delete_action)
@@ -380,6 +401,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                     kind="linebreak", position=cursor, text="\n",
                     event=ev, timestamp=ev.start_time,
                     context_complete=context_complete,
+                    context_at_edit=cmap.context_at(cursor),
                     final_positions=[None],
                 )
                 cmap.insert(cursor, "\n", (action, 0))
@@ -393,6 +415,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
                     kind="insert", position=cursor, text=key,
                     event=ev, timestamp=ev.start_time,
                     context_complete=context_complete,
+                    context_at_edit=cmap.context_at(cursor),
                     final_positions=[None] * len(key),
                 )
                 for i, ch in enumerate(key):
@@ -407,6 +430,7 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
             kind="paste", position=pending_clipboard_cursor,
             text=clipboard, event=pending_clipboard_ev,
             timestamp=pending_clipboard_ev.start_time,
+            context_at_edit=cmap.context_at(pending_clipboard_cursor),
             final_positions=[None] * len(clipboard),
         )
         for i, ch in enumerate(clipboard):
@@ -418,13 +442,19 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
         if char is not None and origin is not None:
             action, offset = origin
             action.final_positions[offset] = visible_prefix[-1]
-        visible_prefix.append(visible_prefix[-1] + (char is not None))
+        visible_prefix.append(visible_prefix[-1] + (char is not None and origin is not None))
     for marker in cmap._markers:
         if marker.final_anchor is not None:
             index = max(0, min(marker.final_anchor, len(cmap._chars)))
             marker.final_anchor = visible_prefix[index]
 
-    return actions, cmap.get_text(), diagnostics
+    final_typed_text = "".join(
+        char for char, origin in zip(cmap._chars, cmap._origins)
+        if char is not None and origin is not None
+    )
+    if document_out is not None:
+        document_out.append(cmap.get_text())
+    return actions, final_typed_text, diagnostics
 
 
 def _classify_revision_type(episode: RevisionEpisode) -> str:
@@ -533,6 +563,8 @@ def _group_into_episodes(
             current = RevisionEpisode(start_time=action.timestamp)
             current_kind = ""
 
+        if action.kind == "delete":
+            current.is_revision = True
         current.actions.append(action)
         current.end_time = action.timestamp
         current_kind = action.kind
@@ -1069,6 +1101,7 @@ class ConversionResult:
     final_text: str
     actions: list[WritingAction]
     episodes: list[RevisionEpisode]
+    final_document_text: str = ""
     metadata: SessionMetadata | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list)
     stats: ConversionStats = field(default_factory=ConversionStats)
@@ -1384,8 +1417,10 @@ def convert(
     events: list[Event],
     metadata: SessionMetadata | None = None,
     parse_warnings: int = 0,
+    initial_text: str = "",
 ) -> ConversionResult:
-    actions, final_text, diagnostics = _process_events(events)
+    final_document: list[str] = []
+    actions, final_text, diagnostics = _process_events(events, initial_text, final_document)
 
     focus_sources, source_paste_indices = _detect_focus_sources(actions)
 
@@ -1434,6 +1469,7 @@ def convert(
         final_text=final_text,
         actions=actions,
         episodes=episodes,
+        final_document_text=final_document[0],
         metadata=metadata,
         diagnostics=diagnostics,
         stats=stats,
