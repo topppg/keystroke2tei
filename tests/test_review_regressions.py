@@ -7,7 +7,7 @@ import pytest
 from lxml import etree
 
 from keystroke2tei.cli import main
-from keystroke2tei.converter import convert
+from keystroke2tei.converter import _ms_to_seq, convert
 from keystroke2tei.idfx_parser import parse_idfx
 from keystroke2tei.klicke_parser import parse_klicke
 from keystroke2tei.models import Event, EventType
@@ -84,6 +84,58 @@ def test_idfx_wordlog_post_key_positions_replay_at_pre_key_cursor(tmp_path):
     assert [(event.position, event.doclength) for event in events] == [(0, 0), (1, 1), (2, 2)]
     result = convert(events)
     assert result.final_text == "a"
+
+
+def test_idfx_empty_oem_key_does_not_create_text_or_shift_cursor(tmp_path):
+    path = tmp_path / "dead-key.idfx"
+    path.write_text(
+        '<log>'
+        '<event id="1" type="keyboard">'
+        '<part type="wordlog"><position>1</position><documentLength>1</documentLength></part>'
+        '<part type="winlog"><key>VK_A</key><value>a</value><startTime>1000</startTime></part>'
+        '</event>'
+        '<event id="2" type="keyboard">'
+        '<part type="wordlog"><position>1</position><documentLength>1</documentLength><replay>False</replay></part>'
+        '<part type="winlog"><key>VK_OEM_6</key><value /><startTime>1500</startTime></part>'
+        '</event>'
+        '<event id="3" type="keyboard">'
+        '<part type="wordlog"><position>2</position><documentLength>2</documentLength></part>'
+        '<part type="winlog"><key>VK_B</key><value>b</value><startTime>2000</startTime></part>'
+        '</event>'
+        '</log>', encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx(path)
+    assert warnings == []
+    assert events[1].output == "UNKNOWN"
+    assert (events[1].position, events[1].doclength) == (1, 1)
+    assert convert(events).final_text == "ab"
+
+
+def test_idfx_clock_anchor_produces_valid_date_sequences_across_midnight(tmp_path):
+    path = tmp_path / "clock.idfx"
+    path.write_text(
+        '<log><meta>'
+        '<entry><key>__LogCreationDate</key><value>24/09/26 23:59:59.500</value></entry>'
+        '<entry><key>__LogRelativeCreationDate</key><value>1000</value></entry>'
+        '</meta>'
+        '<event id="1" type="keyboard">'
+        '<part type="wordlog"><position>1</position><documentLength>1</documentLength></part>'
+        '<part type="winlog"><key>VK_A</key><value>a</value><startTime>1500</startTime></part>'
+        '</event>'
+        '<event id="2" type="keyboard">'
+        '<part type="wordlog"><position>2</position><documentLength>2</documentLength></part>'
+        '<part type="winlog"><key>VK_B</key><value>b</value><startTime>3000</startTime></part>'
+        '</event>'
+        '</log>', encoding="utf-8",
+    )
+    events, metadata, warnings = parse_idfx(path)
+    assert warnings == []
+    assert [_ms_to_seq(event.start_time) for event in events] == [
+        "20260925000000", "20260925000001",
+    ]
+    result = convert(events, metadata=metadata)
+    xml = write_tei(result.segments, metadata=metadata)
+    assert 'seq="20260925000000"' in xml
 
 
 def test_batch_rejects_single_output_file(tmp_path, monkeypatch):
