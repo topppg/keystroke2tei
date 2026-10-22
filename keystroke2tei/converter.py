@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 
@@ -17,7 +18,10 @@ REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\]\s*(.*)")
 
 
 def _ms_to_seq(ms: int) -> str:
-    """Convert milliseconds to hhmmss timestamp for @seq attribute."""
+    """Convert elapsed milliseconds or a local wall-clock epoch to @seq."""
+    if ms >= 100_000_000_000:
+        wall_time = datetime(1970, 1, 1) + timedelta(milliseconds=ms)
+        return wall_time.strftime("%Y%m%d%H%M%S")
     total_seconds = ms // 1000
     h = total_seconds // 3600
     m = (total_seconds % 3600) // 60

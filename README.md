@@ -20,7 +20,8 @@ Researchers need this data in **TEI XML** format — a structured representation
 - **Inline corrections** — each typo fix appears as `<del>` nested inside the flowing text
 - **Flowing text** — one `<add>` per writing burst with inline `<del>` markers, not fragmented elements
 - **Loxensis type classification**: `nt` for new text, `typo` for likely spelling corrections, `context` for edits to a completed sentence, and `pre-context` for edits before completion
-- **`@seq` as timestamp** — `hhmmss` format from the event's start time
+- **`@seq` as timestamp** — `hhmmss` for logs without a clock anchor; IDFX files with
+  creation-clock metadata use `yyyymmddhhmmss` local wall time
 - **`@evidence` as event ID** — single ID or range (e.g. `"380-398"`) linking back to the raw log
 - **Sentence segments** (`<seg>`) based on the replayed final text
 - **`<teiHeader>`** populated from session metadata (participant, language, date)
@@ -45,6 +46,10 @@ Each `<del>` shows exactly what the writer typed and then deleted. `@seq` gives 
 
 The converter replays actions at their pre-event cursor position. The KLiCKe
 CSV and IDFX parsers normalize recorded post-key positions before replay.
+For IDFX, an OEM key with no recorded character is treated as a non-text key;
+the key name is not inserted into the document. When the log supplies both
+`__LogCreationDate` and `__LogRelativeCreationDate`, event times are anchored
+to the recorded local clock, including sessions crossing midnight.
 A position-indexed character map (`CharMap`)
 tracks characters explicitly seen in the log. Autocomplete/spellcheck
 insertions are tracked as unknown (`None`) rather than guessed.

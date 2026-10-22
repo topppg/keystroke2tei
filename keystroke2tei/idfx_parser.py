@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -37,6 +38,10 @@ def _int(el: ET.Element | None) -> int:
 
 def _idfx_key_to_output(key: str, value: str) -> str:
     """Convert IDFX key names (VK_A, VK_RETURN, etc.) to Inputlog-style output."""
+    # OEM keys are keyboard-layout dependent. An empty value records no text;
+    # using the key name as text invents characters and shifts the cursor.
+    if key.startswith("VK_OEM_") and not value:
+        return "UNKNOWN"
     if key.startswith("VK_"):
         name = key[3:]
     else:
@@ -114,6 +119,8 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
     events: list[Event] = []
     warnings: list[str] = []
     metadata = SessionMetadata()
+    relative_creation_ms: int | None = None
+    local_creation: datetime | None = None
 
     raw = path.read_text(encoding="utf-8-sig")
     # Strip garbage before XML declaration (some IDFX files have stray key names prepended)
@@ -145,8 +152,24 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
             val = _text(entry.find("value"))
             if key == "__LogCreationDate":
                 metadata.date = val
+                try:
+                    local_creation = datetime.strptime(val, "%d/%m/%y %H:%M:%S.%f")
+                except ValueError:
+                    warnings.append("invalid __LogCreationDate; retaining relative event times")
+            elif key == "__LogRelativeCreationDate":
+                try:
+                    relative_creation_ms = int(val)
+                except ValueError:
+                    warnings.append("invalid __LogRelativeCreationDate; retaining relative event times")
             elif key == "__MainDocument":
                 metadata.filepath = val
+
+    def wall_clock_ms(relative_ms: int) -> int:
+        if not relative_ms or local_creation is None or relative_creation_ms is None:
+            return relative_ms
+        wall_time = local_creation + timedelta(milliseconds=relative_ms - relative_creation_ms)
+        delta = wall_time - datetime(1970, 1, 1)
+        return delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
 
     for event_el in root.iter("event"):
         event_id = int(event_el.get("id", "0"))
@@ -174,8 +197,8 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                     output=output,
                     char_production=0,
                     action_time=end_time - start_time if end_time > start_time else 0,
-                    start_time=start_time,
-                    end_time=end_time,
+                    start_time=wall_clock_ms(start_time),
+                    end_time=wall_clock_ms(end_time),
                     pause_location=0,
                     pause_location_full="",
                     pause_time=0,
