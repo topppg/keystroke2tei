@@ -168,7 +168,7 @@ def reclassify_with_llm(
         node = node_map[idx]
         old_type = node.revision_type
 
-        if new_type == "continue" and node.kind != NodeKind.MOD:
+        if new_type == "continue" and node.kind == NodeKind.ADD:
             node.kind = NodeKind.MOD
             node.revision_type = "continue"
             changed += 1

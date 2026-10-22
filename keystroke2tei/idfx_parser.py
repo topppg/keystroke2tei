@@ -8,6 +8,7 @@ from xml.etree import ElementTree as ET
 from keystroke2tei.models import Event, EventType, SessionMetadata
 
 _INVALID_XML_CHAR = re.compile(r"&#x([0-9a-fA-F]+);")
+_FRENCH_CIRCUMFLEX = str.maketrans("aeiouAEIOU", "âêîôûÂÊÎÔÛ")
 
 
 def _sanitize_xml(raw: str) -> str:
@@ -90,13 +91,12 @@ def _idfx_key_to_output(key: str, value: str) -> str:
     return name
 
 
-def _pre_key_state(key: str, output: str, position: int, doclength: int) -> tuple[int, int]:
-    """Convert Wordlog's post-key cursor and length to pre-key values.
-
-    The converter replays a keystroke at its pre-key cursor. Inputlog IDFX
-    records the cursor and document length after the key has taken effect.
-    Navigation and modifier keys do not change either value.
-    """
+def _pre_key_state(
+    key: str, output: str, position: int, doclength: int, *, already_pre: bool = False,
+) -> tuple[int, int]:
+    """Normalize Wordlog cursor and length to their pre-key values."""
+    if already_pre:
+        return position, doclength
     if output == "BACK":
         return position + 1, doclength + 1
     if output == "DELETE":
@@ -119,8 +119,10 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
     events: list[Event] = []
     warnings: list[str] = []
     metadata = SessionMetadata()
+    wordlog_pre_key = False
     relative_creation_ms: int | None = None
     local_creation: datetime | None = None
+    pending_circumflex = False
 
     raw = path.read_text(encoding="utf-8-sig")
     # Strip garbage before XML declaration (some IDFX files have stray key names prepended)
@@ -163,6 +165,9 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                     warnings.append("invalid __LogRelativeCreationDate; retaining relative event times")
             elif key == "__MainDocument":
                 metadata.filepath = val
+            elif key == "__LogProgramVersion":
+                major = val.split(".", 1)[0]
+                wordlog_pre_key = major.isdigit() and int(major) >= 9
 
     def wall_clock_ms(relative_ms: int) -> int:
         if not relative_ms or local_creation is None or relative_creation_ms is None:
@@ -171,7 +176,8 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
         delta = wall_time - datetime(1970, 1, 1)
         return delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
 
-    for event_el in root.iter("event"):
+    source_events = list(root.iter("event"))
+    for event_index, event_el in enumerate(source_events):
         event_id = int(event_el.get("id", "0"))
         event_type_str = event_el.get("type", "")
 
@@ -185,11 +191,18 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
 
                 key_name = _text(winlog.find("key") if winlog is not None else None)
                 value = _text(winlog.find("value") if winlog is not None else None)
+                if pending_circumflex:
+                    if len(value) == 1 and value in "aeiouAEIOU":
+                        value = value.translate(_FRENCH_CIRCUMFLEX)
+                    pending_circumflex = False
+                if key_name == "VK_OEM_6" and not value and metadata.language.upper() == "FR":
+                    pending_circumflex = True
                 start_time = _int(winlog.find("startTime") if winlog is not None else None)
                 end_time = _int(winlog.find("endTime") if winlog is not None else None)
 
                 output = _idfx_key_to_output(key_name, value)
-                position, doclength = _pre_key_state(key_name, output, position, doclength)
+                position, doclength = _pre_key_state(
+                    key_name, output, position, doclength, already_pre=wordlog_pre_key)
 
                 events.append(Event(
                     event_type=EventType.KEYBOARD,
@@ -204,6 +217,7 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                     pause_time=0,
                     position=position,
                     doclength=doclength,
+                    replay=(wordlog is None or _text(wordlog.find("replay")) != "False"),
                 ))
 
             elif event_type_str == "replacement":
@@ -213,6 +227,43 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                     end = _int(wordlog.find("end"))
                     newtext_el = wordlog.find("newtext")
                     newtext = (newtext_el.text or "") if newtext_el is not None else ""
+                    if event_index > 0:
+                        preceding = source_events[event_index - 1]
+                        preceding_log = preceding.find("part[@type='wordlog']")
+                        if (
+                            preceding.get("type") == "keyboard"
+                            and preceding_log is not None
+                            and _text(preceding_log.find("replay")) == "False"
+                            and preceding.findtext("part[@type='winlog']/key") == "VK_BACK"
+                        ):
+                            # A non-replayed backspace removes the selection.
+                            # Wordlog's newtext is a stale character snapshot.
+                            newtext = ""
+                            if event_index + 1 < len(source_events):
+                                after = source_events[event_index + 1]
+                                after_log = after.find("part[@type='wordlog']")
+                                if after.get("type") == "selection" and after_log is not None:
+                                    cursor_start = _int(after_log.find("start"))
+                                    cursor_end = _int(after_log.find("end"))
+                                    if cursor_start == cursor_end and cursor_start < start:
+                                        # Wordlog sometimes omits the character
+                                        # immediately before the selected range
+                                        # from the replacement span. The cursor
+                                        # after deletion records the full extent.
+                                        start = cursor_start
+                    if event_index + 1 < len(source_events):
+                        following = source_events[event_index + 1]
+                        selection_log = following.find("part[@type='wordlog']")
+                        if (
+                            following.get("type") == "selection"
+                            and selection_log is not None
+                            and _int(selection_log.find("start")) == start
+                            and _int(selection_log.find("end")) == end
+                            and len(newtext) == end - start
+                        ):
+                            # A selection snapshot repeats existing text; the
+                            # subsequent selection still spans the same range.
+                            continue
                     output = f"[{start}:{end}] {newtext}"
 
                     events.append(Event(

@@ -11,6 +11,7 @@ from keystroke2tei.klicke_parser import parse_klicke
 from keystroke2tei.html_parser import parse_html
 from keystroke2tei.converter import convert
 from keystroke2tei.review import apply_overrides, build_review_report, load_overrides
+from keystroke2tei.replay_parser import parse_replay_html
 from keystroke2tei.validation import validate_tei
 from keystroke2tei.writer import write_tei
 
@@ -54,6 +55,7 @@ def _process_single(
     review_report: bool = False,
     overrides_path: Path | None = None,
     validate: bool = False,
+    replay_path: Path | None = None,
 ) -> bool:
     try:
         if csv_path.suffix.lower() == ".idfx":
@@ -64,7 +66,11 @@ def _process_single(
             events, metadata, parse_warnings = parse_klicke(csv_path)
         else:
             events, metadata, parse_warnings = parse_csv(csv_path)
-        result = convert(events, metadata=metadata, parse_warnings=len(parse_warnings))
+        replay = parse_replay_html(replay_path) if replay_path is not None else None
+        result = convert(
+            events, metadata=metadata, parse_warnings=len(parse_warnings),
+            initial_text=replay.initial_text if replay else "",
+        )
 
         if classify:
             from keystroke2tei.classifier import reclassify_with_llm
@@ -92,6 +98,31 @@ def _process_single(
                 text_mismatch = True
                 print(f"    [warning] {diagnostic.message}", file=sys.stderr)
 
+        replay_typed_match = replay is None or result.final_text == replay.final_added_text
+        replay_document_match = (
+            replay is None or result.final_document_text == replay.final_document_text
+        )
+        source_insertions = sum(
+            len(action.text) for action in result.actions
+            if action.kind in {"insert", "replace", "linebreak", "paste"}
+        )
+        source_deletions = sum(
+            len(action.deleted_text) for action in result.actions
+            if action.kind in {"delete", "replace", "cut"}
+        )
+        replay_count_match = replay is None or (
+            source_insertions == replay.inserted_chars
+            and source_deletions == replay.deleted_added_chars + replay.deleted_initial_chars
+        )
+        replay_match = replay_typed_match and replay_document_match and replay_count_match
+        if replay is not None and not replay_match:
+            print(
+                "    [warning] Conversion differs from replay HTML "
+                f"(typed={replay_typed_match}, document={replay_document_match}, "
+                f"edit counts={replay_count_match})",
+                file=sys.stderr,
+            )
+
         for issue in validation_issues:
             print(f"    [{issue.severity}] {issue.code} at {issue.location}: {issue.message}",
                   file=sys.stderr)
@@ -115,6 +146,20 @@ def _process_single(
 
         if review_report:
             report = build_review_report(result)
+            if replay is not None:
+                report["replay_comparison"] = {
+                    "source": str(replay_path),
+                    "final_typed_text_matches": replay_typed_match,
+                    "final_typed_text_length": len(replay.final_added_text),
+                    "final_document_matches": replay_document_match,
+                    "final_document_length": len(replay.final_document_text),
+                    "edit_counts_match": replay_count_match,
+                    "source_inserted_chars": source_insertions,
+                    "source_deleted_chars": source_deletions,
+                    "inserted_chars": replay.inserted_chars,
+                    "deleted_added_chars": replay.deleted_added_chars,
+                    "deleted_initial_chars": replay.deleted_initial_chars,
+                }
             if validate:
                 report["validation_issues"] = [
                     {"severity": issue.severity, "code": issue.code,
@@ -130,7 +175,7 @@ def _process_single(
             )
 
         return not (any(issue.severity == "error" for issue in validation_issues)
-                    or (validate and text_mismatch))
+                    or (validate and (text_mismatch or not replay_match)))
     except Exception as e:
         print(f"  ERROR {csv_path.name}: {e}", file=sys.stderr)
         return False
@@ -169,6 +214,10 @@ def main() -> None:
         help="Write a JSON sidecar listing editorial review items",
     )
     parser.add_argument(
+        "--replay-html", type=Path,
+        help="Use replay HTML as the starting document and independently check final typed text",
+    )
+    parser.add_argument(
         "--overrides", type=Path,
         help="Apply editorial overrides from a JSON file, or a directory of <stem>.overrides.json files",
     )
@@ -187,6 +236,11 @@ def main() -> None:
         args.output.is_file() or (not args.output.exists() and bool(args.output.suffix))
     ):
         parser.error("multiple inputs require an output directory")
+    if args.replay_html is not None:
+        if len(csv_files) != 1 or csv_files[0].suffix.lower() != ".idfx":
+            parser.error("--replay-html requires one IDFX input")
+        if not args.replay_html.is_file():
+            parser.error("--replay-html path does not exist")
 
     out_paths = [_resolve_output(path, args.output) for path in csv_files]
     if len(set(out_paths)) != len(out_paths):
@@ -209,6 +263,7 @@ def main() -> None:
         if _process_single(
             csv_path, out_path, args.verbose, args.stats, args.classify,
             args.review_report, overrides_path, args.validate,
+            args.replay_html,
         ):
             ok += 1
         else:

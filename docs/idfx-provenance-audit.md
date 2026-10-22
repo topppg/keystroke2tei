@@ -15,11 +15,13 @@ interval, not the replacement's exact time. The paired CSV log does not have
 a matching replacement event ID. An exact `@seq` for these operations cannot
 be recovered from these sources.
 
-IDFX keyboard `wordlog/position` and `wordlog/documentLength` describe the
-state **after** the key. The converter replays keys using the cursor and
-length **before** the key. The parser now converts the recorded values for
-insertion, backspace, and delete keys. This correction does not impute a
-timestamp or alter the source event ID.
+The KLiCKe corpus uses Wordlog 7. Its IDFX keyboard `wordlog/position` and
+`wordlog/documentLength` describe the state **after** the key. The converter
+replays keys using the cursor and length **before** the key, so the parser
+normalizes these values for insertion, backspace, and delete keys. Wordlog 9
+logs, such as AC_33, record the pre-key state directly. The parser selects
+the interpretation from `__LogProgramVersion`. This correction does not
+impute a timestamp or alter the source event ID.
 
 One replacement can produce a `<del>` and an `<add>` with the same ID, and a
 single operation can be split into several TEI elements at sentence or
@@ -58,3 +60,14 @@ splitter now keeps an acronym with a following lowercase word. The review
 report lists every remaining boundary and inferred type; a final
 document comparison should be used alongside it, particularly for sessions
 with replacement events or unsupported virtual keys.
+
+## Replay HTML for Wordlog 9
+
+For AC_33, the Inputlog replay HTML contains the initial document and a
+character-level record of every edit. The saved Word document is useful for
+comparison but does not preserve this edit history. With the replay HTML as
+the initial document, conversion matches the replay's 1,308 surviving typed
+characters and 88,600-character final document exactly. It also agrees on
+1,562 inserted characters and 739 deleted characters (254 typed and 485
+from the initial document). The report records these checks; inferred
+revision types and sentence boundaries still need editorial review.

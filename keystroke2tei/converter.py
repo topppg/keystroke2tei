@@ -14,7 +14,7 @@ IGNORED_KEYS = {"CAPSLOCK", "NUMLOCK", "SCROLL", "INSERT", "ESCAPE", "PRINT", "P
                 "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
                 "LCTRL", "RCTRL", "LALT", "RALT", "LSHIFT", "RSHIFT"}
 MODIFIER_PATTERN = re.compile(r"^(LCTRL|RCTRL|LALT|RALT|LSHIFT|RSHIFT)\s*\+")
-REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\]\s*(.*)")
+REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\] (.*)")
 
 
 def _ms_to_seq(ms: int) -> str:
@@ -211,8 +211,11 @@ def _classify_key(output: str) -> str:
     return "UNKNOWN"
 
 
-def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list[Diagnostic]]:
-    cmap = CharMap()
+def _process_events(
+    events: list[Event], initial_text: str = "",
+    document_out: list[str] | None = None,
+) -> tuple[list[WritingAction], str, list[Diagnostic]]:
+    cmap = CharMap(_chars=list(initial_text), _origins=[None] * len(initial_text))
     actions: list[WritingAction] = []
     diagnostics: list[Diagnostic] = []
     prev_cursor = 0
@@ -323,6 +326,8 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
             continue
 
         if ev.event_type == EventType.KEYBOARD:
+            if not ev.replay:
+                continue
             key = _classify_key(ev.output)
 
             # GA format: bare modifier followed by X/C/V
@@ -418,13 +423,19 @@ def _process_events(events: list[Event]) -> tuple[list[WritingAction], str, list
         if char is not None and origin is not None:
             action, offset = origin
             action.final_positions[offset] = visible_prefix[-1]
-        visible_prefix.append(visible_prefix[-1] + (char is not None))
+        visible_prefix.append(visible_prefix[-1] + (char is not None and origin is not None))
     for marker in cmap._markers:
         if marker.final_anchor is not None:
             index = max(0, min(marker.final_anchor, len(cmap._chars)))
             marker.final_anchor = visible_prefix[index]
 
-    return actions, cmap.get_text(), diagnostics
+    final_typed_text = "".join(
+        char for char, origin in zip(cmap._chars, cmap._origins)
+        if char is not None and origin is not None
+    )
+    if document_out is not None:
+        document_out.append(cmap.get_text())
+    return actions, final_typed_text, diagnostics
 
 
 def _classify_revision_type(episode: RevisionEpisode) -> str:
@@ -533,6 +544,8 @@ def _group_into_episodes(
             current = RevisionEpisode(start_time=action.timestamp)
             current_kind = ""
 
+        if action.kind == "delete":
+            current.is_revision = True
         current.actions.append(action)
         current.end_time = action.timestamp
         current_kind = action.kind
@@ -1069,6 +1082,7 @@ class ConversionResult:
     final_text: str
     actions: list[WritingAction]
     episodes: list[RevisionEpisode]
+    final_document_text: str = ""
     metadata: SessionMetadata | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list)
     stats: ConversionStats = field(default_factory=ConversionStats)
@@ -1384,8 +1398,10 @@ def convert(
     events: list[Event],
     metadata: SessionMetadata | None = None,
     parse_warnings: int = 0,
+    initial_text: str = "",
 ) -> ConversionResult:
-    actions, final_text, diagnostics = _process_events(events)
+    final_document: list[str] = []
+    actions, final_text, diagnostics = _process_events(events, initial_text, final_document)
 
     focus_sources, source_paste_indices = _detect_focus_sources(actions)
 
@@ -1434,6 +1450,7 @@ def convert(
         final_text=final_text,
         actions=actions,
         episodes=episodes,
+        final_document_text=final_document[0],
         metadata=metadata,
         diagnostics=diagnostics,
         stats=stats,
