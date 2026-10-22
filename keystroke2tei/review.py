@@ -129,17 +129,18 @@ def build_review_report(result: ConversionResult) -> dict[str, Any]:
         })
 
     projected = "".join(_reading_text(segment) for segment in result.segments)
-    if projected != result.final_text:
+    expected_text = result.final_document_text or result.final_text
+    if projected != expected_text:
         mismatch = next(
-            (i for i, (actual, expected) in enumerate(zip(projected, result.final_text))
+            (i for i, (actual, expected) in enumerate(zip(projected, expected_text))
              if actual != expected),
-            min(len(projected), len(result.final_text)),
+            min(len(projected), len(expected_text)),
         )
         issues.append({
             "category": "text_mismatch", "severity": "warning",
             "message": "TEI reading text differs from replayed text.",
             "offset": mismatch,
-            "expected_excerpt": result.final_text[max(0, mismatch - 30):mismatch + 30],
+            "expected_excerpt": expected_text[max(0, mismatch - 30):mismatch + 30],
             "actual_excerpt": projected[max(0, mismatch - 30):mismatch + 30],
         })
 
@@ -152,6 +153,7 @@ def build_review_report(result: ConversionResult) -> dict[str, Any]:
         "format_version": 1,
         "source": result.metadata.filepath if result.metadata else "",
         "final_text_length": len(result.final_text),
+        "final_document_length": len(result.final_document_text),
         "issues": issues,
         "source_diagnostics": source_diagnostics,
     }

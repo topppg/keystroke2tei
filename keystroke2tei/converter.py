@@ -222,6 +222,8 @@ def _classify_key(output: str) -> str:
 def _process_events(
     events: list[Event], initial_text: str = "",
     document_out: list[str] | None = None,
+    state_out: list[CharMap] | None = None,
+    full_anchors_out: dict[int, int] | None = None,
 ) -> tuple[list[WritingAction], str, list[Diagnostic]]:
     cmap = CharMap(_chars=list(initial_text), _origins=[None] * len(initial_text))
     actions: list[WritingAction] = []
@@ -436,6 +438,14 @@ def _process_events(
         for i, ch in enumerate(clipboard):
             cmap.insert(pending_clipboard_cursor + i, ch, (paste_action, i))
         actions.append(paste_action)
+
+    if state_out is not None:
+        state_out.append(cmap)
+    if full_anchors_out is not None:
+        full_anchors_out.update(
+            (id(marker), marker.final_anchor)
+            for marker in cmap._markers if marker.final_anchor is not None
+        )
 
     visible_prefix = [0]
     for char, origin in zip(cmap._chars, cmap._origins):
@@ -1413,6 +1423,151 @@ def _visible_text(node: TEINode) -> str:
     return node.text + "".join(_visible_text(child) for child in node.children)
 
 
+def _append_document_text(parent: TEINode, value: str) -> None:
+    """Represent document line breaks explicitly in the reading text."""
+    for index, part in enumerate(value.split("\n")):
+        if index:
+            parent.append(TEINode(kind=NodeKind.LB))
+        if part:
+            parent.append(TEINode(kind=NodeKind.TEXT, text=part))
+
+
+def _build_full_document_segments(
+    cmap: CharMap,
+    episodes: list[RevisionEpisode],
+    full_anchors: dict[int, int],
+    typed_segments: list[TEINode],
+) -> list[TEINode]:
+    """Interleave surviving source text and logged revisions in final reading order."""
+    visible = [
+        (char, origin) for char, origin in zip(cmap._chars, cmap._origins)
+        if char is not None
+    ]
+    prefix = [0]
+    for char in cmap._chars:
+        prefix.append(prefix[-1] + (char is not None))
+
+    action_episodes = {
+        id(action): episode for episode in episodes for action in episode.actions
+    }
+    typed_markup: dict[int, TEINode] = {}
+
+    def index_markup(node: TEINode, owner: TEINode | None = None) -> None:
+        if node.kind in (NodeKind.ADD, NodeKind.MOD):
+            owner = node
+        if node.kind in (NodeKind.TEXT, NodeKind.LB) and owner is not None:
+            for position in node.positions:
+                if position is not None:
+                    typed_markup[position] = owner
+        for child in node.children:
+            index_markup(child, owner)
+
+    for typed_segment in typed_segments:
+        index_markup(typed_segment)
+    deletions: dict[int, list[tuple[RevisionEpisode, WritingAction, str]]] = {}
+    for episode in episodes:
+        deleted_actions = [
+            action for action in episode.actions
+            if action.kind in ("delete", "cut", "replace") and action.deleted_text
+        ]
+        if not deleted_actions:
+            continue
+        if all(action.kind == "delete" for action in deleted_actions):
+            # Backspace logs one character at a time in reverse reading order.
+            groups = [(deleted_actions[0], episode.deleted_text)]
+        else:
+            groups = [(action, action.deleted_text) for action in deleted_actions]
+        for action, deleted_text in groups:
+            anchor = min(
+                (full_anchors[id(item)] for item in deleted_actions if id(item) in full_anchors),
+                default=action.position,
+            ) if len(groups) == 1 else full_anchors.get(id(action), action.position)
+            anchor = prefix[max(0, min(anchor, len(cmap._chars)))]
+            deletions.setdefault(anchor, []).append((episode, action, deleted_text))
+
+    ranges = _find_sentence_ranges("".join(char for char, _ in visible))
+    if not visible:
+        ranges = [(0, 0)]
+    segments: list[TEINode] = []
+    for range_index, (start, end) in enumerate(ranges):
+        segment = TEINode(kind=NodeKind.SEG)
+        run_chars: list[str] = []
+        run_episode: RevisionEpisode | None = None
+        run_owner: TEINode | None = None
+        run_actions: list[WritingAction] = []
+
+        def flush() -> None:
+            nonlocal run_episode, run_owner
+            if not run_chars:
+                return
+            value = "".join(run_chars)
+            if run_episode is None:
+                _append_document_text(segment, value)
+            else:
+                first = run_actions[0]
+                seq = _ms_to_seq(first.timestamp) if first.timestamp or (
+                    first.event is not None and first.event.event_type != EventType.REPLACEMENT
+                ) else ""
+                rev_type = run_owner.revision_type if run_owner is not None else (
+                    "source" if any(
+                        action.kind == "paste" and action.deleted_text == "source"
+                        for action in run_actions
+                    ) else _classify_revision_type(run_episode)
+                )
+                addition = TEINode(
+                    kind=run_owner.kind if run_owner is not None else NodeKind.ADD,
+                    seq=run_owner.seq if run_owner is not None else seq,
+                    revision_type=rev_type,
+                    evidence=_evidence_from_actions(run_actions),
+                )
+                _append_document_text(addition, value)
+                segment.append(addition)
+            run_chars.clear()
+            run_actions.clear()
+            run_episode = None
+            run_owner = None
+
+        # Include deletions at the right edge in the preceding sentence. This
+        # keeps all source operations even when the final document is empty.
+        last_position = end + (range_index == len(ranges) - 1)
+        for position in range(start, last_position):
+            for episode, action, deleted_text in deletions.get(position, []):
+                flush()
+                seq = _ms_to_seq(action.timestamp) if action.timestamp or (
+                    action.event is not None and action.event.event_type != EventType.REPLACEMENT
+                ) else ""
+                deletion = TEINode(
+                    kind=NodeKind.DEL, seq=seq,
+                    revision_type=("translocation" if action.kind == "cut"
+                                   else _classify_revision_type(episode)),
+                    evidence=_evidence_from_actions(
+                        [item for item in episode.actions if item.kind == "delete"]
+                    ) if action.kind == "delete" else _evidence_from_actions([action]),
+                )
+                _append_document_text(deletion, deleted_text)
+                segment.append(deletion)
+            if position == end:
+                break
+            char, origin = visible[position]
+            episode = action_episodes.get(id(origin[0])) if origin is not None else None
+            owner = (
+                typed_markup.get(origin[0].final_positions[origin[1]])
+                if origin is not None and origin[1] < len(origin[0].final_positions)
+                else None
+            )
+            if run_chars and (episode is not run_episode or owner is not run_owner):
+                flush()
+            run_episode = episode
+            run_owner = owner
+            run_chars.append(char)
+            if origin is not None and all(action is not origin[0] for action in run_actions):
+                run_actions.append(origin[0])
+        flush()
+        if segment.children:
+            segments.append(segment)
+    return segments
+
+
 def convert(
     events: list[Event],
     metadata: SessionMetadata | None = None,
@@ -1420,18 +1575,17 @@ def convert(
     initial_text: str = "",
 ) -> ConversionResult:
     final_document: list[str] = []
-    actions, final_text, diagnostics = _process_events(events, initial_text, final_document)
+    state: list[CharMap] = []
+    full_anchors: dict[int, int] = {}
+    actions, final_text, diagnostics = _process_events(
+        events, initial_text, final_document, state, full_anchors,
+    )
 
     focus_sources, source_paste_indices = _detect_focus_sources(actions)
 
     # Mark source pastes in actions for _build_tei_tree
     for i in source_paste_indices:
-        actions[i] = WritingAction(
-            kind="paste", position=actions[i].position, text=actions[i].text,
-            deleted_text="source", event=actions[i].event, timestamp=actions[i].timestamp,
-            context_complete=actions[i].context_complete,
-            final_positions=actions[i].final_positions,
-        )
+        actions[i].deleted_text = "source"
 
     episodes = _group_into_episodes(actions)
     _refine_deletion_types(episodes, diagnostics)
@@ -1447,13 +1601,17 @@ def convert(
             if seg.children:
                 segments.append(seg)
 
+    if initial_text:
+        segments = _build_full_document_segments(state[0], episodes, full_anchors, segments)
+
     diagnostics.extend(_audit_notation(segments))
     projected_text = "".join(_visible_text(seg) for seg in segments)
-    if projected_text != final_text:
+    expected_text = final_document[0] if initial_text else final_text
+    if projected_text != expected_text:
         mismatch = next(
-            (i for i, (actual, expected) in enumerate(zip(projected_text, final_text))
+            (i for i, (actual, expected) in enumerate(zip(projected_text, expected_text))
              if actual != expected),
-            min(len(projected_text), len(final_text)),
+            min(len(projected_text), len(expected_text)),
         )
         diagnostics.append(Diagnostic(
             0, 0,

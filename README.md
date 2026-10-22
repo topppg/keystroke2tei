@@ -115,9 +115,13 @@ uv run keystroke2tei session.idfx -o session.tei.xml \
   --replay-html replay_session.html --final-docx session.docx --review-report
 ```
 
-The review report includes `replay_comparison` with the match result and edit
-counts. A final-text mismatch is printed as a warning; `--validate` also makes
-it a conversion error. The final Word document is used only to locate and
+The resulting XML includes the full final document, including surviving text
+from the starting document. In the keystroke paragraph, text inside `<add>`
+comes from logged writing; unmarked text survives from the starting document.
+The review report compares the serialized XML reading text with the replay's
+final document, as well as the reconstructed text and edit counts. A mismatch
+is printed as a warning; `--validate` also makes it a conversion error.
+The final Word document is used only to locate and
 identify ambiguous one-character insertions. A replay HTML generated from the same IDFX
 and Word files is a detailed cross-check, but is not independent evidence for
 every editorial decision.
@@ -155,9 +159,13 @@ result = convert(events, metadata=metadata)
 xml = write_tei(result.segments, metadata=metadata)
 
 print(result.final_text)
+print(result.final_document_text)
 print(result.stats.to_dict())
 print(result.diagnostics)
 ```
+
+`final_text` is the surviving logged text; `final_document_text` includes the
+starting document when one was supplied.
 
 ## Running tests
 
@@ -274,9 +282,9 @@ override; the `issues` list is recalculated from the current tree.
 - **Editorial types are inferred.** Keystroke order and cursor position cannot establish a writer's intent. In particular, distinguishing a spelling correction from a word choice change requires review. The converter reports uncertain word replacements.
 - **Overlapping revisions can resist tree encoding.** Some crossing insertions require an operation to be split into multiple XML elements. That can repeat its source `@evidence`; the validator and review report flag this. The converter also reports any reading-text mismatch found in new input.
 - **Source attributes may be incomplete.** Some IDFX replacement events lack a timestamp, so `@seq` cannot be derived. A single replacement can create both `<del>` and `<add>` with the same source event ID; the converter reports the repeated `@evidence` instead of inventing an identifier.
-- **Starting-document deletions require a baseline.** Use `--replay-html` when
-  available to recover the exact text removed from the document that existed
-  before logging began.
+- **Starting documents require a baseline.** Use `--replay-html` to include
+  surviving original text and recover the exact text removed before logging
+  began. Without it, the XML can represent only text known from the log.
 - **Deep nesting is heuristic.** Complex edits may need manual adjustment.
 
 The corpus figures above measure conversion and text fidelity. They do not certify every inferred revision type or sentence boundary; those remain editorial decisions.

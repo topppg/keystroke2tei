@@ -117,3 +117,22 @@ def write_tei(
         pretty_print=False,
         encoding="unicode",
     )
+
+
+def tei_reading_text(xml: str) -> str:
+    """Extract the final document reading from the serialized keystroke body."""
+    root = etree.fromstring(xml.encode("utf-8"))
+    paragraph = root.find('.//{*}p[@source="keystrokes"]')
+    if paragraph is None:
+        return ""
+
+    def read(element: etree._Element) -> str:
+        if etree.QName(element).localname == "del":
+            return ""
+        parts = [element.text or ""]
+        for child in element:
+            parts.append("\n" if etree.QName(child).localname == "lb" else read(child))
+            parts.append(child.tail or "")
+        return "".join(parts)
+
+    return read(paragraph)
