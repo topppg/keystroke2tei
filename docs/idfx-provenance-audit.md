@@ -71,3 +71,20 @@ characters and 88,600-character final document exactly. It also agrees on
 1,562 inserted characters and 739 deleted characters (254 typed and 485
 from the initial document). The report records these checks; inferred
 revision types and sentence boundaries still need editorial review.
+
+## Cross-corpus check of replay rules
+
+A 100-file systematic sample of the Wordlog 7 WritingTask corpus and all 22
+locally available SCR logs were checked against the AC_33 parser rules. The
+Wordlog 7 sample contained 885 same-length replacements followed by a matching
+selection. That pattern alone does not prove the replacement is a snapshot:
+discarding it reduced similarity to the independently saved document for
+session `30098353` from 0.96860 to 0.95316. The parser now retains these
+events and lets the converter skip a replacement only when its `newtext`
+actually matches the current document span. AC_33 still matches its replay
+exactly with this correction.
+
+The same sample contained 563 replacements after non-replayed backspaces;
+all had empty `newtext`. The 22 SCR logs had another 27, also empty. The
+nonempty stale values corrected for AC_33 have not been observed in these
+other sources, so that correction remains provisional for other logs.

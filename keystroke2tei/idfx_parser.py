@@ -251,19 +251,6 @@ def parse_idfx(path: Path) -> tuple[list[Event], SessionMetadata, list[str]]:
                                         # from the replacement span. The cursor
                                         # after deletion records the full extent.
                                         start = cursor_start
-                    if event_index + 1 < len(source_events):
-                        following = source_events[event_index + 1]
-                        selection_log = following.find("part[@type='wordlog']")
-                        if (
-                            following.get("type") == "selection"
-                            and selection_log is not None
-                            and _int(selection_log.find("start")) == start
-                            and _int(selection_log.find("end")) == end
-                            and len(newtext) == end - start
-                        ):
-                            # A selection snapshot repeats existing text; the
-                            # subsequent selection still spans the same range.
-                            continue
                     output = f"[{start}:{end}] {newtext}"
 
                     events.append(Event(
