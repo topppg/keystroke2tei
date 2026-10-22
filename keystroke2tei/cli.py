@@ -15,7 +15,7 @@ from keystroke2tei.converter import convert
 from keystroke2tei.review import apply_overrides, build_review_report, load_overrides
 from keystroke2tei.replay_parser import parse_replay_html
 from keystroke2tei.validation import validate_tei
-from keystroke2tei.writer import write_tei
+from keystroke2tei.writer import tei_reading_text, write_tei
 
 SUPPORTED_EXTENSIONS = {".csv", ".idfx", ".html"}
 
@@ -83,7 +83,9 @@ def _process_single(
 
         if classify:
             from keystroke2tei.classifier import reclassify_with_llm
-            changed = reclassify_with_llm(result.segments, result.final_text, result.actions)
+            changed = reclassify_with_llm(
+                result.segments, result.final_document_text, result.actions,
+            )
             if verbose and changed:
                 print(f"    [classify] LLM reclassified {changed} revision(s)", file=sys.stderr)
 
@@ -91,6 +93,9 @@ def _process_single(
             apply_overrides(result, load_overrides(overrides_path))
 
         xml = write_tei(result.segments, metadata=metadata, focus_sources=result.focus_sources)
+        xml_reading = tei_reading_text(xml)
+        expected_reading = replay.final_document_text if replay else result.final_document_text
+        xml_reading_match = xml_reading == expected_reading
         validation_issues = validate_tei(xml) if validate else []
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +128,16 @@ def _process_single(
             source_insertions == replay.inserted_chars
             and source_deletions == replay.deleted_added_chars + replay.deleted_initial_chars
         )
-        replay_match = replay_typed_match and replay_document_match and replay_count_match
+        replay_match = (
+            replay_typed_match and replay_document_match and replay_count_match
+            and xml_reading_match
+        )
+        if not xml_reading_match:
+            print(
+                "    [warning] TEI reading text differs from the final document "
+                f"(XML={len(xml_reading)} chars, expected={len(expected_reading)} chars)",
+                file=sys.stderr,
+            )
         if replay is not None and not replay_match:
             print(
                 "    [warning] Conversion differs from replay HTML "
@@ -161,6 +175,8 @@ def _process_single(
                     "final_typed_text_matches": replay_typed_match,
                     "final_typed_text_length": len(replay.final_added_text),
                     "final_document_matches": replay_document_match,
+                    "tei_reading_matches": xml_reading_match,
+                    "tei_reading_length": len(xml_reading),
                     "final_document_length": len(replay.final_document_text),
                     "edit_counts_match": replay_count_match,
                     "source_inserted_chars": source_insertions,

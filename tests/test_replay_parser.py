@@ -7,6 +7,7 @@ from keystroke2tei.converter import WritingAction, convert
 from keystroke2tei.idfx_replay import parse_idfx_with_initial_text
 from keystroke2tei.models import Event, EventType, NodeKind, TEINode
 from keystroke2tei.replay_parser import parse_replay_html
+from keystroke2tei.writer import tei_reading_text, write_tei
 
 
 def test_replay_supplies_baseline_and_independent_final_text(tmp_path):
@@ -71,7 +72,29 @@ def test_idfx_conversion_uses_replay_baseline_and_reports_match(tmp_path):
     report = json.loads((tmp_path / "session.review.json").read_text())
     assert report["replay_comparison"]["final_typed_text_matches"] is True
     assert report["replay_comparison"]["final_document_matches"] is True
+    assert report["replay_comparison"]["tei_reading_matches"] is True
     assert report["replay_comparison"]["edit_counts_match"] is True
+    assert tei_reading_text(output_path.read_text()) == "aX"
+
+
+def test_full_document_tei_keeps_unchanged_source_and_logged_revisions():
+    event = Event(
+        EventType.REPLACEMENT, 1, "[6:11] Earth", 1000, 1000, 0, 0, 0,
+        "", 0, 6, 12,
+    )
+    result = convert([event], initial_text="Hello world.\nNext line.")
+    xml = write_tei(result.segments)
+    assert tei_reading_text(xml) == "Hello Earth.\nNext line."
+    assert "<del" in xml and ">world</del>" in xml
+    assert "<add" in xml and "Earth" in xml
+    assert "Next line." in xml
+
+
+def test_full_document_tei_without_events_keeps_starting_text():
+    result = convert([], initial_text="Je suis arrivée dans notre chambre.\nSuite.")
+    xml = write_tei(result.segments)
+    assert tei_reading_text(xml) == result.final_document_text
+    assert "Je suis arrivée dans notre chambre." in xml
 
 
 def test_wordlog_selection_snapshot_does_not_replace_document(tmp_path):
