@@ -114,6 +114,11 @@ The review report includes `replay_comparison` with the match result and edit
 counts. A final-text mismatch is printed as a warning; `--validate` also makes
 it a conversion error.
 
+`--classify` makes an optional model call only for editorial revision labels.
+Text reconstruction and replay checks stay deterministic. The classifier sees
+candidate edits in source-action order with a short snapshot of the document
+immediately before each edit; its labels remain subject to editorial review.
+
 ### Validate and prepare editorial review
 
 ```bash

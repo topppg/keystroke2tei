@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import httpx
 from jinja2 import Template
 
 from keystroke2tei.models import NodeKind, TEINode
+from keystroke2tei.converter import WritingAction
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "google/gemini-2.5-flash"
@@ -23,14 +25,33 @@ def _load_prompt_template() -> Template:
     return Template(path.read_text(encoding="utf-8"))
 
 
-def _collect_classifiable_nodes(segments: list[TEINode]) -> list[tuple[int, TEINode]]:
+def _collect_classifiable_nodes(
+    segments: list[TEINode], actions: list[WritingAction] | None = None,
+) -> list[tuple[int, TEINode]]:
+    candidates: list[tuple[TEINode, int]] = []
     nodes: list[tuple[int, TEINode]] = []
     counter = 0
     prev_was_revision = False
 
     def _walk(node: TEINode, depth: int = 0) -> None:
-        nonlocal counter, prev_was_revision
-        if node.kind in (NodeKind.DEL, NodeKind.MOD):
+        if node.kind in (NodeKind.ADD, NodeKind.DEL) and "|" not in node.revision_type:
+            candidates.append((node, depth))
+        for child in node.children:
+            _walk(child, depth + 1)
+
+    for seg in segments:
+        _walk(seg, depth=0)
+
+    if actions:
+        action_index = {
+            action.event.event_id: index for index, action in reversed(list(enumerate(actions)))
+            if action.event is not None
+        }
+        candidates.sort(key=lambda item: action_index.get(
+            _first_event_id(item[0].evidence), len(actions)))
+
+    for node, depth in candidates:
+        if node.kind == NodeKind.DEL:
             counter += 1
             nodes.append((counter, node))
             prev_was_revision = True
@@ -45,11 +66,6 @@ def _collect_classifiable_nodes(segments: list[TEINode]) -> list[tuple[int, TEIN
             prev_was_revision = False
         elif node.kind == NodeKind.ADD and node.revision_type == "nt":
             prev_was_revision = False
-        for child in node.children:
-            _walk(child, depth + 1)
-
-    for seg in segments:
-        _walk(seg, depth=0)
     return nodes
 
 
@@ -65,44 +81,72 @@ def _get_node_text_content(node: TEINode) -> str:
     return "".join(parts)
 
 
-def _get_context(final_text: str, pos: int, width: int = 30) -> str:
-    start = max(0, pos - width)
-    end = min(len(final_text), pos + width)
-    before = final_text[start:pos]
-    after = final_text[pos:end]
-    return f"...{before}|{after}..."
+def _first_event_id(evidence: str) -> int | None:
+    match = re.match(r"\d+", evidence)
+    return int(match.group()) if match else None
+
+
+def _order_by_source(
+    revision_nodes: list[tuple[int, TEINode]], actions: list[WritingAction],
+) -> list[tuple[int, TEINode]]:
+    action_index = {
+        action.event.event_id: index for index, action in reversed(list(enumerate(actions)))
+        if action.event is not None
+    }
+    ordered = sorted(
+        enumerate(revision_nodes),
+        key=lambda item: (
+            action_index.get(_first_event_id(item[1][1].evidence), len(actions)),
+            item[0],
+        ),
+    )
+    return [(index, node) for index, (_, (_, node)) in enumerate(ordered, 1)]
+
+
+def _action_summary(action: WritingAction) -> dict[str, str | int]:
+    summary: dict[str, str | int] = {
+        "event": action.event.event_id if action.event else 0,
+        "kind": action.kind,
+        "position": action.position,
+    }
+    if action.text:
+        summary["text"] = action.text[:20]
+    if action.deleted_text:
+        summary["deleted"] = action.deleted_text[:20]
+    return summary
 
 
 def _build_revisions_text(
     revision_nodes: list[tuple[int, TEINode]],
-    final_text: str,
+    actions: list[WritingAction],
 ) -> str:
     lines: list[str] = []
-    prev_was_del_or_revision = False
+    action_index = {
+        action.event.event_id: index for index, action in reversed(list(enumerate(actions)))
+        if action.event is not None
+    }
     for idx, node in revision_nodes:
-        text_content = _get_node_text_content(node)
-        kind = node.kind.value
-        rev_type = node.revision_type or "unknown"
-        context = _get_context(final_text, node.start_pos) if node.start_pos >= 0 else "N/A"
-
-        flags: list[str] = []
-        if prev_was_del_or_revision and node.kind == NodeKind.ADD and rev_type == "nt":
-            flags.append("follows_revision=true (candidate for 'continue')")
-
-        flag_str = f" [{', '.join(flags)}]" if flags else ""
-
-        if node.kind == NodeKind.DEL:
-            lines.append(
-                f"{idx}. [{kind}] current_type=\"{rev_type}\" deleted=\"{text_content}\" "
-                f"context: {context}{flag_str}"
-            )
-        else:
-            lines.append(
-                f"{idx}. [{kind}] current_type=\"{rev_type}\" added=\"{text_content}\" "
-                f"context: {context}{flag_str}"
-            )
-
-        prev_was_del_or_revision = node.kind == NodeKind.DEL or rev_type not in ("nt",)
+        source_index = action_index.get(_first_event_id(node.evidence))
+        action = actions[source_index] if source_index is not None else None
+        candidate = {
+            "id": idx,
+            "element": node.kind.value,
+            "current_type": node.revision_type or "unknown",
+            "text": _get_node_text_content(node),
+            "source_evidence": node.evidence,
+            "source_action": _action_summary(action) if action else None,
+            "context_before_edit": action.context_at_edit if action else None,
+            "ending_punctuation_to_right": action.context_complete if action else None,
+            "previous_actions": [
+                _action_summary(previous) for previous in
+                actions[max(0, source_index - 2):source_index]
+            ] if source_index is not None else [],
+            "next_action": (
+                _action_summary(actions[source_index + 1])
+                if source_index is not None and source_index + 1 < len(actions) else None
+            ),
+        }
+        lines.append(json.dumps(candidate, ensure_ascii=False, separators=(",", ":")))
     return "\n".join(lines)
 
 
@@ -134,20 +178,23 @@ def _parse_response(response_text: str) -> list[dict[str, str | int]]:
     return json.loads(text)
 
 
-VALID_TYPES = {"typo", "pre-context", "context", "continue"}
+VALID_TYPES = {"nt", "typo", "pre-context", "context", "continue"}
 
 
 def reclassify_with_llm(
     segments: list[TEINode],
     final_text: str,
+    actions: list[WritingAction] | None = None,
 ) -> int:
-    revision_nodes = _collect_classifiable_nodes(segments)
+    source_actions = actions or []
+    revision_nodes = _order_by_source(
+        _collect_classifiable_nodes(segments, source_actions), source_actions)
     if not revision_nodes:
         return 0
 
-    revisions_text = _build_revisions_text(revision_nodes, final_text)
+    revisions_text = _build_revisions_text(revision_nodes, source_actions)
     template = _load_prompt_template()
-    prompt = template.render(final_text=final_text, revisions=revisions_text)
+    prompt = template.render(revisions=revisions_text)
 
     try:
         response_text = _call_openrouter(prompt)
@@ -168,11 +215,13 @@ def reclassify_with_llm(
         node = node_map[idx]
         old_type = node.revision_type
 
+        if node.kind == NodeKind.DEL and new_type in {"nt", "continue"}:
+            continue
         if new_type == "continue" and node.kind == NodeKind.ADD:
             node.kind = NodeKind.MOD
             node.revision_type = "continue"
             changed += 1
-        elif new_type != old_type and new_type != "continue":
+        elif new_type != old_type:
             node.revision_type = new_type
             changed += 1
 

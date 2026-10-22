@@ -64,6 +64,7 @@ class WritingAction:
     event: Event | None = None
     timestamp: int = 0
     context_complete: bool = False
+    context_at_edit: str = ""
     final_positions: list[int | None] = field(default_factory=list)
     final_anchor: int | None = None
 
@@ -133,6 +134,13 @@ class CharMap:
 
     def get_text(self) -> str:
         return "".join(c for c in self._chars if c is not None)
+
+    def context_at(self, pos: int, width: int = 50) -> str:
+        """Text surrounding a cursor immediately before a writing action."""
+        pos = max(0, min(pos, self.length))
+        left = "".join(ch if ch is not None else "□" for ch in self._chars[max(0, pos - width):pos])
+        right = "".join(ch if ch is not None else "□" for ch in self._chars[pos:pos + width])
+        return f"{left}|{right}"
 
     def sentence_complete_at(self, pos: int) -> bool:
         """Whether the sentence at pos already has closing punctuation."""
@@ -240,6 +248,7 @@ def _process_events(
             if pending_clipboard_op == "CTRL+X":
                 cut_len = max(0, cmap.length - ev.doclength)
                 cut_text = ""
+                cut_context = cmap.context_at(pending_clipboard_cursor)
                 for _ in range(cut_len):
                     if pending_clipboard_cursor < cmap.length:
                         ch = cmap.delete(pending_clipboard_cursor)
@@ -250,6 +259,7 @@ def _process_events(
                         kind="cut", position=pending_clipboard_cursor,
                         deleted_text=cut_text, event=pending_clipboard_ev,
                         timestamp=pending_clipboard_ev.start_time,
+                        context_at_edit=cut_context,
                     )
                     cmap.mark_deleted(cut_action)
                     actions.append(cut_action)
@@ -272,6 +282,7 @@ def _process_events(
                         kind="paste", position=pending_clipboard_cursor,
                         text=paste_text, event=pending_clipboard_ev,
                         timestamp=pending_clipboard_ev.start_time,
+                        context_at_edit=cmap.context_at(pending_clipboard_cursor),
                         final_positions=[None] * len(paste_text),
                     )
                     for i, ch in enumerate(paste_text):
@@ -313,6 +324,7 @@ def _process_events(
                         kind="replace", position=start, text=new_text,
                         deleted_text=old_text, event=ev, timestamp=ev.start_time,
                         context_complete=context_complete,
+                        context_at_edit=cmap.context_at(start),
                         final_positions=[None] * len(new_text),
                     )
                     cmap.replace_range(start, end, new_text, replace_action)
@@ -350,6 +362,7 @@ def _process_events(
                 del_pos = cursor - 1
                 if del_pos >= 0:
                     deleted_sentence_complete = cmap.sentence_complete_at(del_pos)
+                    context_at_edit = cmap.context_at(del_pos)
                     deleted = cmap.delete(del_pos)
                     if not deleted:
                         diagnostics.append(Diagnostic(
@@ -361,11 +374,13 @@ def _process_events(
                         kind="delete", position=del_pos,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
                         context_complete=deleted_sentence_complete,
+                        context_at_edit=context_at_edit,
                     )
                     cmap.mark_deleted(delete_action)
                     actions.append(delete_action)
             elif key == "DELETE":
                 if cursor < cmap.length:
+                    context_at_edit = cmap.context_at(cursor)
                     deleted = cmap.delete(cursor)
                     if not deleted:
                         diagnostics.append(Diagnostic(
@@ -377,6 +392,7 @@ def _process_events(
                         kind="delete", position=cursor,
                         deleted_text=deleted, event=ev, timestamp=ev.start_time,
                         context_complete=context_complete,
+                        context_at_edit=context_at_edit,
                     )
                     cmap.mark_deleted(delete_action)
                     actions.append(delete_action)
@@ -385,6 +401,7 @@ def _process_events(
                     kind="linebreak", position=cursor, text="\n",
                     event=ev, timestamp=ev.start_time,
                     context_complete=context_complete,
+                    context_at_edit=cmap.context_at(cursor),
                     final_positions=[None],
                 )
                 cmap.insert(cursor, "\n", (action, 0))
@@ -398,6 +415,7 @@ def _process_events(
                     kind="insert", position=cursor, text=key,
                     event=ev, timestamp=ev.start_time,
                     context_complete=context_complete,
+                    context_at_edit=cmap.context_at(cursor),
                     final_positions=[None] * len(key),
                 )
                 for i, ch in enumerate(key):
@@ -412,6 +430,7 @@ def _process_events(
             kind="paste", position=pending_clipboard_cursor,
             text=clipboard, event=pending_clipboard_ev,
             timestamp=pending_clipboard_ev.start_time,
+            context_at_edit=cmap.context_at(pending_clipboard_cursor),
             final_positions=[None] * len(clipboard),
         )
         for i, ch in enumerate(clipboard):

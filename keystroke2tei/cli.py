@@ -74,7 +74,7 @@ def _process_single(
 
         if classify:
             from keystroke2tei.classifier import reclassify_with_llm
-            changed = reclassify_with_llm(result.segments, result.final_text)
+            changed = reclassify_with_llm(result.segments, result.final_text, result.actions)
             if verbose and changed:
                 print(f"    [classify] LLM reclassified {changed} revision(s)", file=sys.stderr)
 
