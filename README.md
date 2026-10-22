@@ -51,7 +51,9 @@ For IDFX, an OEM key with no recorded character is treated as a non-text key;
 the key name is not inserted into the document. On French layouts, an empty
 `VK_OEM_6` dead key composes with the following vowel. IDFX events marked
 `replay=False` are represented by their following replacement event; selection
-snapshots do not create text. When the log supplies both
+snapshots are checked against the current text. When a Wordlog 9 replay is
+available, its starting document enables fuller reconstruction of selections,
+Word-generated insertions, clipboard edits, and keys typed in dialogs. When the log supplies both
 `__LogCreationDate` and `__LogRelativeCreationDate`, event times are anchored
 to the recorded local clock, including sessions crossing midnight.
 A position-indexed character map (`CharMap`)
@@ -68,6 +70,8 @@ sharing a source event ID. The IDFX files do not record timestamps for
 replacement events. The cursor correction and a sample comparison with saved
 final documents are documented in
 [the IDFX provenance audit](docs/idfx-provenance-audit.md).
+The Wordlog 9 development and held-out replay checks are in
+[the replay audit](docs/wordlog9-replay-audit.md).
 
 ## Installation
 
@@ -101,18 +105,22 @@ uv run keystroke2tei data/input/ -o data/output/ -v --stats
 - `-v` prints diagnostics, including cases that need editorial review
 - `--stats` writes a JSON sidecar per file with conversion statistics
 
-For an IDFX file with its Inputlog replay HTML, supply the replay to recover
-deleted text from the starting document and check surviving typed text against
-the replay independently:
+For a Wordlog 9 IDFX file with its Inputlog replay HTML, supply the replay to
+recover the starting document and check the reconstructed text and edit counts.
+If a saved final Word document is available, it can resolve single-character
+Word insertions whose exact position is absent from the IDFX log:
 
 ```bash
 uv run keystroke2tei session.idfx -o session.tei.xml \
-  --replay-html replay_session.html --review-report
+  --replay-html replay_session.html --final-docx session.docx --review-report
 ```
 
 The review report includes `replay_comparison` with the match result and edit
 counts. A final-text mismatch is printed as a warning; `--validate` also makes
-it a conversion error.
+it a conversion error. The final Word document is used only to locate and
+identify ambiguous one-character insertions. A replay HTML generated from the same IDFX
+and Word files is a detailed cross-check, but is not independent evidence for
+every editorial decision.
 
 `--classify` makes an optional model call only for editorial revision labels.
 Text reconstruction and replay checks stay deterministic. The classifier sees

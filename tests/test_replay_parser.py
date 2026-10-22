@@ -4,6 +4,7 @@ import json
 
 from keystroke2tei.cli import _process_single
 from keystroke2tei.converter import WritingAction, convert
+from keystroke2tei.idfx_replay import parse_idfx_with_initial_text
 from keystroke2tei.models import Event, EventType, NodeKind, TEINode
 from keystroke2tei.replay_parser import parse_replay_html
 
@@ -71,6 +72,48 @@ def test_idfx_conversion_uses_replay_baseline_and_reports_match(tmp_path):
     assert report["replay_comparison"]["final_typed_text_matches"] is True
     assert report["replay_comparison"]["final_document_matches"] is True
     assert report["replay_comparison"]["edit_counts_match"] is True
+
+
+def test_wordlog_selection_snapshot_does_not_replace_document(tmp_path):
+    path = tmp_path / "selection.idfx"
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value>'
+        '</entry></meta>'
+        '<event id="1" type="replacement"><part type="wordlog">'
+        '<start>0</start><end>3</end><newtext>dog</newtext></part></event>'
+        '<event id="2" type="selection"><part type="wordlog">'
+        '<start>0</start><end>3</end></part></event>'
+        '<event id="3" type="keyboard">'
+        '<part type="wordlog"><position>0</position><documentLength>3</documentLength>'
+        '<replay>False</replay></part>'
+        '<part type="winlog"><key>VK_D</key><value>d</value></part></event>'
+        '<event id="4" type="replacement"><part type="wordlog">'
+        '<start>0</start><end>3</end><newtext>d</newtext></part></event></log>',
+        encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx_with_initial_text(path, "cat")
+    assert warnings == []
+    assert [event.event_id for event in events] == [4]
+    assert convert(events, initial_text="cat").final_document_text == "d"
+
+
+def test_saved_final_text_resolves_ambiguous_word_insertion(tmp_path):
+    path = tmp_path / "word-insert.idfx"
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value>'
+        '</entry></meta>'
+        '<event id="1" type="insert"><part type="wordlog">'
+        '<position>2</position><before>x</before></part></event>'
+        '<event id="2" type="keyboard">'
+        '<part type="wordlog"><position>3</position><documentLength>3</documentLength>'
+        '<replay>True</replay></part>'
+        '<part type="winlog"><key>VK_C</key><value>c</value>'
+        '<startTime>1000</startTime><endTime>1100</endTime></part></event></log>',
+        encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx_with_initial_text(path, "ab", "abxc")
+    assert warnings == ["resolved 1 ambiguous Word insertion(s) using the saved final document"]
+    assert convert(events, initial_text="ab").final_document_text == "abxc"
 
 
 def test_ai_continue_does_not_turn_a_deletion_into_a_modification(monkeypatch):

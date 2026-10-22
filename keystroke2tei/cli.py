@@ -7,6 +7,8 @@ from pathlib import Path
 
 from keystroke2tei.parser import parse_csv
 from keystroke2tei.idfx_parser import parse_idfx
+from keystroke2tei.idfx_replay import parse_idfx_with_initial_text
+from keystroke2tei.docx_text import read_docx_text
 from keystroke2tei.klicke_parser import parse_klicke
 from keystroke2tei.html_parser import parse_html
 from keystroke2tei.converter import convert
@@ -56,17 +58,24 @@ def _process_single(
     overrides_path: Path | None = None,
     validate: bool = False,
     replay_path: Path | None = None,
+    final_docx_path: Path | None = None,
 ) -> bool:
     try:
+        replay = parse_replay_html(replay_path) if replay_path is not None else None
         if csv_path.suffix.lower() == ".idfx":
-            events, metadata, parse_warnings = parse_idfx(csv_path)
+            if replay is not None:
+                final_text = read_docx_text(final_docx_path) if final_docx_path else None
+                events, metadata, parse_warnings = parse_idfx_with_initial_text(
+                    csv_path, replay.initial_text, final_text,
+                )
+            else:
+                events, metadata, parse_warnings = parse_idfx(csv_path)
         elif csv_path.suffix.lower() == ".html":
             events, metadata, parse_warnings = parse_html(csv_path)
         elif _is_klicke_csv(csv_path):
             events, metadata, parse_warnings = parse_klicke(csv_path)
         else:
             events, metadata, parse_warnings = parse_csv(csv_path)
-        replay = parse_replay_html(replay_path) if replay_path is not None else None
         result = convert(
             events, metadata=metadata, parse_warnings=len(parse_warnings),
             initial_text=replay.initial_text if replay else "",
@@ -215,7 +224,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--replay-html", type=Path,
-        help="Use replay HTML as the starting document and independently check final typed text",
+        help="Use replay HTML as the starting document and check the reconstructed edits",
+    )
+    parser.add_argument(
+        "--final-docx", type=Path,
+        help="Use a saved final Word document to locate ambiguous one-character Word insertions",
     )
     parser.add_argument(
         "--overrides", type=Path,
@@ -241,6 +254,11 @@ def main() -> None:
             parser.error("--replay-html requires one IDFX input")
         if not args.replay_html.is_file():
             parser.error("--replay-html path does not exist")
+    if args.final_docx is not None:
+        if args.replay_html is None:
+            parser.error("--final-docx requires --replay-html")
+        if not args.final_docx.is_file():
+            parser.error("--final-docx path does not exist")
 
     out_paths = [_resolve_output(path, args.output) for path in csv_files]
     if len(set(out_paths)) != len(out_paths):
@@ -264,6 +282,7 @@ def main() -> None:
             csv_path, out_path, args.verbose, args.stats, args.classify,
             args.review_report, overrides_path, args.validate,
             args.replay_html,
+            args.final_docx,
         ):
             ok += 1
         else:

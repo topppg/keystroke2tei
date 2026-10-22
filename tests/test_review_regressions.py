@@ -61,6 +61,11 @@ def test_idfx_replacement_preserves_spaces_and_uses_no_stale_doclength(tmp_path)
     assert events[1].doclength == 0
 
 
+def test_multiline_replacement_is_replayed():
+    event = Event(EventType.REPLACEMENT, 1, "[0:0] first\nsecond", 0, 0, 0, 0, 0, "", 0, 0, 0)
+    assert convert([event]).final_text == "first\nsecond"
+
+
 def test_idfx_wordlog_pre_key_positions_replay_at_recorded_cursor(tmp_path):
     path = tmp_path / "pre-key.idfx"
     path.write_text(

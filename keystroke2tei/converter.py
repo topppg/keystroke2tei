@@ -14,7 +14,7 @@ IGNORED_KEYS = {"CAPSLOCK", "NUMLOCK", "SCROLL", "INSERT", "ESCAPE", "PRINT", "P
                 "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
                 "LCTRL", "RCTRL", "LALT", "RALT", "LSHIFT", "RSHIFT"}
 MODIFIER_PATTERN = re.compile(r"^(LCTRL|RCTRL|LALT|RALT|LSHIFT|RSHIFT)\s*\+")
-REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\] (.*)")
+REPLACEMENT_PATTERN = re.compile(r"^\[(\d+):(\d+)\] (.*)", re.DOTALL)
 
 
 def _ms_to_seq(ms: int) -> str:
