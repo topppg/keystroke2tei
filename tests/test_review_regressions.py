@@ -163,11 +163,27 @@ def test_idfx_selection_snapshot_and_non_replayed_backspace(tmp_path):
     )
     events, _, warnings = parse_idfx(path)
     assert warnings == []
-    assert [event.event_id for event in events] == [3, 4]
-    assert events[0].replay is False
+    assert [event.event_id for event in events] == [1, 3, 4]
+    assert events[1].replay is False
     result = convert(events, initial_text="abc")
     assert result.final_text == ""
     assert [action.deleted_text for action in result.actions if action.kind == "replace"] == ["abc"]
+
+
+def test_idfx_same_length_replacement_followed_by_selection_is_preserved(tmp_path):
+    path = tmp_path / "same-length.idfx"
+    path.write_text(
+        '<log><event id="1" type="replacement"><part type="wordlog">'
+        '<start>0</start><end>3</end><newtext>dog</newtext>'
+        '</part></event>'
+        '<event id="2" type="selection"><part type="wordlog">'
+        '<start>0</start><end>3</end></part></event></log>',
+        encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx(path)
+    assert warnings == []
+    assert [event.event_id for event in events] == [1]
+    assert convert(events, initial_text="cat").final_document_text == "dog"
 
 
 def test_idfx_french_dead_key_composes_following_vowel(tmp_path):
