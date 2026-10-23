@@ -303,7 +303,19 @@ def parse_idfx_with_initial_text(
     insertions whose IDFX events contain only a cursor and surrounding text.
     """
     events, metadata, warnings, trace = _parse_once(path, initial_text)
-    if final_text is None or not trace["automatic_inserts"]:
+    if final_text is None:
+        unresolved = sum(
+            inserted_id in trace["identities"]
+            for _, inserted_id in trace["automatic_inserts"]
+        )
+        if unresolved:
+            warnings.append(
+                f"{unresolved} surviving one-character Word insertion(s) cannot be "
+                "verified from IDFX and the original document alone; "
+                "provide --final-docx to resolve them"
+            )
+        return events, metadata, warnings
+    if not trace["automatic_inserts"]:
         return events, metadata, warnings
 
     fixes: dict[int, tuple[int | None, str]] = {}

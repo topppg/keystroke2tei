@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from zipfile import ZipFile
 
 from keystroke2tei.cli import _process_single
 from keystroke2tei.converter import WritingAction, convert
@@ -8,6 +9,43 @@ from keystroke2tei.idfx_replay import parse_idfx_with_initial_text
 from keystroke2tei.models import Event, EventType, NodeKind, TEINode
 from keystroke2tei.replay_parser import parse_replay_html
 from keystroke2tei.writer import tei_reading_text, write_tei
+
+
+def _write_original_docx(path, text):
+    """Make a single-paragraph Word document for baseline-input tests."""
+    from xml.sax.saxutils import escape
+
+    document_xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:body><w:p><w:r><w:t xml:space="preserve">{escape(text)}</w:t>'
+        '</w:r></w:p></w:body></w:document>'
+    )
+    with ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+
+
+def _write_simple_idfx(path):
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key>'
+        '<value>9.6.0.0</value></entry></meta>'
+        '<event id="1" type="keyboard">'
+        '<part type="wordlog"><position>2</position><documentLength>3</documentLength>'
+        '<replay>True</replay></part>'
+        '<part type="winlog"><key>VK_X</key><value>X</value>'
+        '<startTime>1000</startTime></part></event></log>',
+        encoding="utf-8",
+    )
+
+
+def _write_simple_replay(path):
+    path.write_text(
+        '<script id="data" type="application/json">'
+        + json.dumps({
+            "T": "abX\n",
+            "X": [[2, 1, -1, 1]],
+            "S": {"t": [0, 100]},
+        }) + '</script>', encoding="utf-8",
+    )
 
 
 def test_replay_supplies_baseline_and_independent_final_text(tmp_path):
@@ -77,6 +115,64 @@ def test_idfx_conversion_uses_replay_baseline_and_reports_match(tmp_path):
     assert tei_reading_text(output_path.read_text()) == "aX"
 
 
+def test_original_docx_supplies_baseline_without_replay(tmp_path):
+    idfx_path = tmp_path / "session.idfx"
+    original_path = tmp_path / "original.docx"
+    output_path = tmp_path / "session.tei.xml"
+    _write_simple_idfx(idfx_path)
+    _write_original_docx(original_path, "ab")
+
+    assert _process_single(
+        idfx_path, output_path, verbose=False, write_stats=False,
+        review_report=True, original_docx_path=original_path,
+    )
+    assert tei_reading_text(output_path.read_text()) == "abX\n"
+    report = json.loads((tmp_path / "session.review.json").read_text())
+    assert "replay_comparison" not in report
+
+
+def test_original_docx_and_replay_compare_starting_and_final_text(tmp_path):
+    idfx_path = tmp_path / "session.idfx"
+    original_path = tmp_path / "original.docx"
+    replay_path = tmp_path / "replay.html"
+    output_path = tmp_path / "session.tei.xml"
+    _write_simple_idfx(idfx_path)
+    _write_original_docx(original_path, "ab")
+    _write_simple_replay(replay_path)
+
+    assert _process_single(
+        idfx_path, output_path, verbose=False, write_stats=False,
+        review_report=True, replay_path=replay_path,
+        original_docx_path=original_path,
+    )
+    report = json.loads((tmp_path / "session.review.json").read_text())
+    comparison = report["replay_comparison"]
+    assert comparison["initial_document_matches"] is True
+    assert comparison["final_document_matches"] is True
+    assert comparison["tei_reading_matches"] is True
+    assert tei_reading_text(output_path.read_text()) == "abX\n"
+
+
+def test_original_docx_replay_baseline_mismatch_is_reported(tmp_path, capsys):
+    idfx_path = tmp_path / "session.idfx"
+    original_path = tmp_path / "original.docx"
+    replay_path = tmp_path / "replay.html"
+    output_path = tmp_path / "session.tei.xml"
+    _write_simple_idfx(idfx_path)
+    _write_original_docx(original_path, "ac")
+    _write_simple_replay(replay_path)
+
+    assert not _process_single(
+        idfx_path, output_path, verbose=False, write_stats=False,
+        review_report=True, validate=True, replay_path=replay_path,
+        original_docx_path=original_path,
+    )
+    report = json.loads((tmp_path / "session.review.json").read_text())
+    assert report["replay_comparison"]["initial_document_matches"] is False
+    assert tei_reading_text(output_path.read_text()) == "acX\n"
+    assert "Original DOCX text differs" in capsys.readouterr().err
+
+
 def test_full_document_tei_keeps_unchanged_source_and_logged_revisions():
     event = Event(
         EventType.REPLACEMENT, 1, "[6:11] Earth", 1000, 1000, 0, 0, 0,
@@ -134,6 +230,8 @@ def test_saved_final_text_resolves_ambiguous_word_insertion(tmp_path):
         '<startTime>1000</startTime><endTime>1100</endTime></part></event></log>',
         encoding="utf-8",
     )
+    _, _, unverified = parse_idfx_with_initial_text(path, "ab")
+    assert any("cannot be verified from IDFX" in warning for warning in unverified)
     events, _, warnings = parse_idfx_with_initial_text(path, "ab", "abxc")
     assert warnings == ["resolved 1 ambiguous Word insertion(s) using the saved final document"]
     assert convert(events, initial_text="ab").final_document_text == "abxc"
