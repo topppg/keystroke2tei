@@ -291,6 +291,7 @@ def _parse_once(
             last = None
             position = min(position, len(document))
             if key == "VK_BACK" or value == "\x08":
+                dead = False
                 if position > 0:
                     replace_range(position - 1, position, "", source_id, key_output="BACK")
             elif key == "VK_RETURN":

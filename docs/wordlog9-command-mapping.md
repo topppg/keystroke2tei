@@ -18,6 +18,8 @@ recorded selection, keyboard action, and subsequent document change agree.
 | Selected text and Ctrl+X without a confirmed matching paste | Preserve a deletion without claiming a move | The cut event identifies the deletion; its contextual type remains subject to the usual revision rules. |
 | Selected text, Ctrl+C, then Ctrl+V | Preserve an insertion and the unchanged source | Do not label the insertion `translocation`, because no text was removed. |
 | Word `replacement` or `insert` after a keyboard action | Use the Word event to confirm document change, selection, or insertion length | Prefer the triggering keyboard event for `@evidence` and `@seq` when the operation is established. Untimed Word events alone cannot supply an exact `@seq`. |
+| Empty French `VK_OEM_6` dead key, then a vowel | Compose the circumflex with that vowel | The vowel's keyboard event supplies the written character and its evidence. |
+| Empty French `VK_OEM_6`, then Backspace | Cancel the pending accent before processing subsequent keys | A later plain vowel remains plain; a new dead key is needed to accent it. |
 
 A matching final document confirms the **resulting text**, not the operation
 that produced it. For example, AC_21 moves “tellement” within its sentence:

@@ -254,6 +254,35 @@ def test_wordlog_selection_snapshot_does_not_replace_document(tmp_path):
     assert convert(events, initial_text="cat").final_document_text == "d"
 
 
+def test_wordlog_backspace_cancels_pending_circumflex(tmp_path):
+    path = tmp_path / "cancel-dead-key.idfx"
+
+    def key(event_id, name, value, position, length, replay):
+        return (
+            f'<event id="{event_id}" type="keyboard">'
+            f'<part type="wordlog"><position>{position}</position>'
+            f'<documentLength>{length}</documentLength>'
+            f'<replay>{str(replay)}</replay></part>'
+            f'<part type="winlog"><key>{name}</key><value>{value}</value>'
+            '</part></event>'
+        )
+
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value>'
+        '</entry></meta>'
+        + key(1, "VK_OEM_6", "", 2, 2, False)
+        + key(2, "VK_BACK", "", 2, 2, True)
+        + key(3, "VK_BACK", "", 1, 1, True)
+        + key(4, "VK_O", "o", 0, 0, True)
+        + key(5, "VK_OEM_6", "", 1, 1, False)
+        + key(6, "VK_I", "i", 1, 1, True)
+        + '</log>', encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx_with_initial_text(path, "bo")
+    assert warnings == []
+    assert convert(events, initial_text="bo").final_document_text == "oî"
+
+
 def test_wordlog_cut_and_delayed_paste_keep_keyboard_provenance(tmp_path):
     path = tmp_path / "move.idfx"
     path.write_text(
