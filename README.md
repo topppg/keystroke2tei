@@ -119,22 +119,25 @@ uv run keystroke2tei session.idfx -o session.tei.xml \
 The resulting XML includes the full final document, including surviving text
 from the starting document. In the keystroke paragraph, text inside `<add>`
 comes from logged writing; unmarked text survives from the starting document.
-The final Word document is used only to locate and identify ambiguous
-one-character insertions; it is not substituted for the reconstructed text.
+The final Word document can locate and identify ambiguous one-character
+insertions; it is not substituted for the reconstructed text. The completed
+TEI reading is also compared with the saved final DOCX. Differences are shown
+as warnings and recorded in the review report; `--validate` treats a mismatch
+as an error. A saved document may include a later correction that the IDFX
+session did not record, so inspect mismatches before changing historical text.
 If no final DOCX is supplied and such an insertion survives, the converter
 warns because the IDFX and original document cannot determine its exact value
 and location. AC_21 has one such insertion.
 
 If an Inputlog replay HTML is available, add `--replay-html replay_session.html`
-to compare the original DOCX with its starting text and the reconstructed
-document, serialized XML reading text, and edit counts with the replay. A
-mismatch is printed as a warning; `--validate` also makes it a conversion error.
-The replay is optional: without it, the original DOCX still supplies the
-baseline and the XML reading text is checked against the reconstruction. For
-older workflows without an original DOCX, `--replay-html` can also supply the
-starting text. A replay HTML generated from the same IDFX and Word files is a
-detailed cross-check, but is not independent evidence for every editorial
-decision.
+alongside `--original-docx` to compare the original DOCX with its starting text
+and the reconstructed document, serialized XML reading text, and edit counts
+with the replay. A mismatch is printed as a warning; `--validate` also makes it
+a conversion error. The replay is optional and never supplies conversion input.
+Because it is generated from the IDFX and Word files, agreement with it is a
+cross-check, not independent evidence for every editorial decision.
+See [Wordlog 9 command evidence](docs/wordlog9-command-mapping.md) for how
+recorded cut, copy, paste, and Word events map to Loxensis notation.
 
 `--classify` makes an optional model call only for editorial revision labels.
 Text reconstruction and replay checks stay deterministic. The classifier sees
@@ -294,9 +297,7 @@ override; the `issues` list is recalculated from the current tree.
 - **Source attributes may be incomplete.** Some IDFX replacement events lack a timestamp, so `@seq` cannot be derived. A single replacement can create both `<del>` and `<add>` with the same source event ID; the converter reports the repeated `@evidence` instead of inventing an identifier.
 - **Starting documents require a baseline.** Use `--original-docx` to include
   surviving original text and recover the exact text removed during the
-  session. A replay HTML can supply that starting text if the original DOCX
-  is unavailable. Without either, the XML can represent only text known from
-  the log.
+  session. Without it, the XML can represent only text known from the log.
 - **Deep nesting is heuristic.** Complex edits may need manual adjustment.
 
 The corpus figures above measure conversion and text fidelity. They do not certify every inferred revision type or sentence boundary; those remain editorial decisions.

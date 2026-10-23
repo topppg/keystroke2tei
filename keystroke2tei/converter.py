@@ -322,8 +322,14 @@ def _process_events(
                 context_complete = cmap.sentence_complete_at(start)
                 old_text = "".join(ch for ch in cmap._chars[start:end] if ch is not None)
                 if old_text != new_text:
+                    operation_kind = (
+                        ev.revision_operation
+                        if (ev.revision_operation == "cut" and old_text and not new_text)
+                        or (ev.revision_operation == "paste" and new_text and not old_text)
+                        else "replace"
+                    )
                     replace_action = WritingAction(
-                        kind="replace", position=start, text=new_text,
+                        kind=operation_kind, position=start, text=new_text,
                         deleted_text=old_text, event=ev, timestamp=ev.start_time,
                         context_complete=context_complete,
                         context_at_edit=cmap.context_at(start),
@@ -1152,7 +1158,8 @@ def _detect_focus_sources(actions: list[WritingAction]) -> tuple[list[FocusEvent
             fe = FocusEvent(app_name=a.text, timestamp=a.timestamp, event_id=ev_id)
             focus_sources.append(fe)
             last_focus_out = fe
-        elif a.kind == "paste" and last_focus_out is not None:
+        elif (a.kind == "paste" and last_focus_out is not None
+              and not (a.event and a.event.revision_operation == "paste")):
             source_paste_indices.add(i)
             last_focus_out = None
         elif a.kind not in ("move",):

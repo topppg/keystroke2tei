@@ -48,7 +48,7 @@ def _write_simple_replay(path):
     )
 
 
-def test_replay_supplies_baseline_and_independent_final_text(tmp_path):
+def test_replay_parser_reads_starting_and_final_text_for_comparison(tmp_path):
     path = tmp_path / "replay.html"
     data = {
         "T": "abX",
@@ -76,17 +76,19 @@ def test_replacement_preserves_leading_space_in_new_text():
     assert result.actions[0].deleted_text == "ab"
 
 
-def test_idfx_conversion_uses_replay_baseline_and_reports_match(tmp_path):
+def test_idfx_conversion_uses_original_baseline_and_checks_replay(tmp_path):
     replay_path = tmp_path / "replay.html"
     replay_path.write_text(
         '<script id="data" type="application/json">'
         + json.dumps({
-            "T": "abX",
+            "T": "abX\n",
             "X": [[1, 0, 1, 0], [2, 1, -1, 1]],
             "S": {"t": [0, 100]},
         }) + '</script>', encoding="utf-8",
     )
     idfx_path = tmp_path / "session.idfx"
+    original_path = tmp_path / "original.docx"
+    _write_original_docx(original_path, "ab")
     idfx_path.write_text(
         '<log>'
         '<meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value></entry></meta>'
@@ -105,6 +107,7 @@ def test_idfx_conversion_uses_replay_baseline_and_reports_match(tmp_path):
     assert _process_single(
         idfx_path, output_path, verbose=False, write_stats=False,
         review_report=True, replay_path=replay_path,
+        original_docx_path=original_path,
     )
     assert ">b</del>" in output_path.read_text()
     report = json.loads((tmp_path / "session.review.json").read_text())
@@ -112,7 +115,22 @@ def test_idfx_conversion_uses_replay_baseline_and_reports_match(tmp_path):
     assert report["replay_comparison"]["final_document_matches"] is True
     assert report["replay_comparison"]["tei_reading_matches"] is True
     assert report["replay_comparison"]["edit_counts_match"] is True
-    assert tei_reading_text(output_path.read_text()) == "aX"
+    assert tei_reading_text(output_path.read_text()) == "aX\n"
+
+
+def test_replay_cannot_supply_conversion_baseline(tmp_path, capsys):
+    idfx_path = tmp_path / "session.idfx"
+    replay_path = tmp_path / "replay.html"
+    output_path = tmp_path / "session.tei.xml"
+    _write_simple_idfx(idfx_path)
+    _write_simple_replay(replay_path)
+
+    assert not _process_single(
+        idfx_path, output_path, verbose=False, write_stats=False,
+        replay_path=replay_path,
+    )
+    assert "requires --original-docx" in capsys.readouterr().err
+    assert not output_path.exists()
 
 
 def test_original_docx_supplies_baseline_without_replay(tmp_path):
@@ -129,6 +147,26 @@ def test_original_docx_supplies_baseline_without_replay(tmp_path):
     assert tei_reading_text(output_path.read_text()) == "abX\n"
     report = json.loads((tmp_path / "session.review.json").read_text())
     assert "replay_comparison" not in report
+
+
+def test_final_docx_is_checked_against_tei_reading(tmp_path, capsys):
+    idfx_path = tmp_path / "session.idfx"
+    original_path = tmp_path / "original.docx"
+    final_path = tmp_path / "final.docx"
+    output_path = tmp_path / "session.tei.xml"
+    _write_simple_idfx(idfx_path)
+    _write_original_docx(original_path, "ab")
+    _write_original_docx(final_path, "abY")
+
+    assert not _process_single(
+        idfx_path, output_path, verbose=False, write_stats=False,
+        review_report=True, validate=True, original_docx_path=original_path,
+        final_docx_path=final_path,
+    )
+    assert tei_reading_text(output_path.read_text()) == "abX\n"
+    report = json.loads((tmp_path / "session.review.json").read_text())
+    assert report["final_docx_comparison"]["tei_reading_matches"] is False
+    assert "differs from saved final DOCX" in capsys.readouterr().err
 
 
 def test_original_docx_and_replay_compare_starting_and_final_text(tmp_path):
@@ -214,6 +252,116 @@ def test_wordlog_selection_snapshot_does_not_replace_document(tmp_path):
     assert warnings == []
     assert [event.event_id for event in events] == [4]
     assert convert(events, initial_text="cat").final_document_text == "d"
+
+
+def test_wordlog_cut_and_delayed_paste_keep_keyboard_provenance(tmp_path):
+    path = tmp_path / "move.idfx"
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value>'
+        '</entry></meta>'
+        '<event id="1" type="selection"><part type="wordlog">'
+        '<start>4</start><end>7</end></part></event>'
+        '<event id="2" type="keyboard"><part type="wordlog">'
+        '<position>4</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_LCONTROL</key>'
+        '<startTime>1000</startTime></part></event>'
+        '<event id="3" type="keyboard"><part type="wordlog">'
+        '<position>4</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_X</key>'
+        '<startTime>2000</startTime></part></event>'
+        '<event id="4" type="replacement"><part type="wordlog">'
+        '<start>4</start><end>7</end><newtext>d</newtext></part></event>'
+        '<event id="5" type="selection"><part type="wordlog">'
+        '<start>0</start><end>0</end></part></event>'
+        '<event id="6" type="keyboard"><part type="wordlog">'
+        '<position>0</position><documentLength>5</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_LCONTROL</key>'
+        '<startTime>3000</startTime></part></event>'
+        '<event id="7" type="keyboard"><part type="wordlog">'
+        '<position>0</position><documentLength>5</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_V</key>'
+        '<startTime>4000</startTime></part></event>'
+        '<event id="8" type="insert"><part type="wordlog">'
+        '<position>50</position><before>unrelated</before></part></event>'
+        '<event id="9" type="keyboard"><part type="wordlog">'
+        '<position>3</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_SHIFT</key>'
+        '<startTime>5000</startTime></part></event>'
+        '</log>', encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx_with_initial_text(path, "abc def\n")
+    assert warnings == []
+    assert [(event.event_id, event.revision_operation) for event in events] == [
+        (3, "cut"), (7, "paste"),
+    ]
+    result = convert(events, initial_text="abc def\n")
+    xml = write_tei(result.segments)
+    assert tei_reading_text(xml) == "defabc \n"
+    assert 'type="translocation" evidence="3">def</del>' in xml
+    assert 'type="translocation" evidence="7">def</add>' in xml
+
+
+def test_wordlog_unpaired_cut_is_not_called_translocation(tmp_path):
+    path = tmp_path / "cut-only.idfx"
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value>'
+        '</entry></meta>'
+        '<event id="1" type="selection"><part type="wordlog">'
+        '<start>4</start><end>7</end></part></event>'
+        '<event id="2" type="keyboard"><part type="wordlog">'
+        '<position>4</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_LCONTROL</key></part></event>'
+        '<event id="3" type="keyboard"><part type="wordlog">'
+        '<position>4</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_X</key><startTime>2000</startTime>'
+        '</part></event>'
+        '<event id="4" type="replacement"><part type="wordlog">'
+        '<start>4</start><end>7</end><newtext>d</newtext></part></event>'
+        '</log>', encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx_with_initial_text(path, "abc def\n")
+    assert warnings == []
+    assert [(event.event_id, event.revision_operation) for event in events] == [(3, "")]
+    xml = write_tei(convert(events, initial_text="abc def\n").segments)
+    assert tei_reading_text(xml) == "abc \n"
+    assert 'type="translocation"' not in xml
+
+
+def test_wordlog_copy_paste_is_not_called_translocation(tmp_path):
+    path = tmp_path / "copy.idfx"
+    path.write_text(
+        '<log><meta><entry><key>__LogProgramVersion</key><value>9.6.0.0</value>'
+        '</entry></meta>'
+        '<event id="1" type="selection"><part type="wordlog">'
+        '<start>4</start><end>7</end></part></event>'
+        '<event id="2" type="keyboard"><part type="wordlog">'
+        '<position>4</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_LCONTROL</key></part></event>'
+        '<event id="3" type="keyboard"><part type="wordlog">'
+        '<position>4</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_C</key></part></event>'
+        '<event id="4" type="selection"><part type="wordlog">'
+        '<start>0</start><end>0</end></part></event>'
+        '<event id="5" type="keyboard"><part type="wordlog">'
+        '<position>0</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_LCONTROL</key></part></event>'
+        '<event id="6" type="keyboard"><part type="wordlog">'
+        '<position>0</position><documentLength>8</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_V</key><startTime>4000</startTime>'
+        '</part></event>'
+        '<event id="7" type="insert"><part type="wordlog">'
+        '<position>0</position></part></event>'
+        '<event id="8" type="keyboard"><part type="wordlog">'
+        '<position>3</position><documentLength>11</documentLength><replay>False</replay>'
+        '</part><part type="winlog"><key>VK_SHIFT</key></part></event>'
+        '</log>', encoding="utf-8",
+    )
+    events, _, warnings = parse_idfx_with_initial_text(path, "abc def\n")
+    assert warnings == []
+    assert [(event.event_id, event.revision_operation) for event in events] == [(6, "copy")]
+    xml = write_tei(convert(events, initial_text="abc def\n").segments)
+    assert tei_reading_text(xml) == "defabc def\n"
+    assert 'type="translocation"' not in xml
 
 
 def test_saved_final_text_resolves_ambiguous_word_insertion(tmp_path):

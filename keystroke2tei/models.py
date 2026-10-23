@@ -37,6 +37,7 @@ class Event:
     x: int | None = None
     y: int | None = None
     replay: bool = True
+    revision_operation: str = ""  # Wordlog cut/paste operation confirmed by a keyboard event
 
 
 class RevisionType(Enum):
