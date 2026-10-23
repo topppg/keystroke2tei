@@ -1,5 +1,9 @@
 # Wordlog 9 replay audit
 
+This records an earlier replay-backed audit. Current conversion takes its
+starting document from `--original-docx`; replay HTML is optional verification
+only. See [Wordlog 9 command evidence](wordlog9-command-mapping.md).
+
 Five Wordlog 9.6 French IDFX sessions were supplied with an original Word
 document, saved final Word document, and HTML replay. AC_12, AC_27, AC_41,
 and AC_15 were used to refine the deterministic replay rules. AC_21 was kept

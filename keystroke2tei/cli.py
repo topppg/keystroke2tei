@@ -59,14 +59,19 @@ def _process_single(
     validate: bool = False,
     replay_path: Path | None = None,
     final_docx_path: Path | None = None,
+    original_docx_path: Path | None = None,
 ) -> bool:
     try:
         replay = parse_replay_html(replay_path) if replay_path is not None else None
+        if replay is not None and original_docx_path is None:
+            raise ValueError("--replay-html requires --original-docx; replay HTML is verification only")
+        initial_text = read_docx_text(original_docx_path) if original_docx_path is not None else ""
+        final_docx_text = read_docx_text(final_docx_path) if final_docx_path is not None else None
+        baseline_match = replay is None or initial_text == replay.initial_text
         if csv_path.suffix.lower() == ".idfx":
-            if replay is not None:
-                final_text = read_docx_text(final_docx_path) if final_docx_path else None
+            if original_docx_path is not None:
                 events, metadata, parse_warnings = parse_idfx_with_initial_text(
-                    csv_path, replay.initial_text, final_text,
+                    csv_path, initial_text, final_docx_text,
                 )
             else:
                 events, metadata, parse_warnings = parse_idfx(csv_path)
@@ -78,7 +83,7 @@ def _process_single(
             events, metadata, parse_warnings = parse_csv(csv_path)
         result = convert(
             events, metadata=metadata, parse_warnings=len(parse_warnings),
-            initial_text=replay.initial_text if replay else "",
+            initial_text=initial_text,
         )
 
         if classify:
@@ -94,8 +99,9 @@ def _process_single(
 
         xml = write_tei(result.segments, metadata=metadata, focus_sources=result.focus_sources)
         xml_reading = tei_reading_text(xml)
-        expected_reading = replay.final_document_text if replay else result.final_document_text
-        xml_reading_match = xml_reading == expected_reading
+        xml_reading_match = xml_reading == result.final_document_text
+        replay_reading_match = replay is None or xml_reading == replay.final_document_text
+        final_docx_match = final_docx_text is None or xml_reading == final_docx_text
         validation_issues = validate_tei(xml) if validate else []
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,13 +135,27 @@ def _process_single(
             and source_deletions == replay.deleted_added_chars + replay.deleted_initial_chars
         )
         replay_match = (
-            replay_typed_match and replay_document_match and replay_count_match
-            and xml_reading_match
+            baseline_match and replay_typed_match and replay_document_match and replay_count_match
+            and replay_reading_match
         )
+        if not baseline_match:
+            print(
+                "    [warning] Original DOCX text differs from the replay's starting document",
+                file=sys.stderr,
+            )
         if not xml_reading_match:
             print(
-                "    [warning] TEI reading text differs from the final document "
-                f"(XML={len(xml_reading)} chars, expected={len(expected_reading)} chars)",
+                "    [warning] TEI reading text differs from reconstructed IDFX document "
+                f"(XML={len(xml_reading)} chars, reconstruction={len(result.final_document_text)} chars)",
+                file=sys.stderr,
+            )
+        if final_docx_text is not None and not final_docx_match:
+            mismatch = next((index for index, (left, right) in enumerate(zip(xml_reading, final_docx_text))
+                             if left != right), min(len(xml_reading), len(final_docx_text)))
+            print(
+                "    [warning] TEI reading text differs from saved final DOCX "
+                f"at character {mismatch} (XML={len(xml_reading)} chars, "
+                f"DOCX={len(final_docx_text)} chars)",
                 file=sys.stderr,
             )
         if replay is not None and not replay_match:
@@ -159,6 +179,10 @@ def _process_single(
                     continue
                 print(f"    [{d.level}] event {d.event_id} (t={d.timestamp}): {d.message}",
                       file=sys.stderr)
+        elif parse_warnings:
+            for warning in parse_warnings:
+                if "cannot be verified from IDFX" in warning:
+                    print(f"    [warning] {warning}", file=sys.stderr)
 
         if write_stats:
             stats_path = out_path.with_name(out_path.stem.removesuffix(".tei") + ".stats.json")
@@ -169,13 +193,22 @@ def _process_single(
 
         if review_report:
             report = build_review_report(result)
+            report["parse_warnings"] = parse_warnings
+            if final_docx_text is not None:
+                report["final_docx_comparison"] = {
+                    "source": str(final_docx_path),
+                    "tei_reading_matches": final_docx_match,
+                    "tei_reading_length": len(xml_reading),
+                    "final_docx_length": len(final_docx_text),
+                }
             if replay is not None:
                 report["replay_comparison"] = {
                     "source": str(replay_path),
+                    "initial_document_matches": baseline_match,
                     "final_typed_text_matches": replay_typed_match,
                     "final_typed_text_length": len(replay.final_added_text),
                     "final_document_matches": replay_document_match,
-                    "tei_reading_matches": xml_reading_match,
+                    "tei_reading_matches": replay_reading_match,
                     "tei_reading_length": len(xml_reading),
                     "final_document_length": len(replay.final_document_text),
                     "edit_counts_match": replay_count_match,
@@ -200,7 +233,8 @@ def _process_single(
             )
 
         return not (any(issue.severity == "error" for issue in validation_issues)
-                    or (validate and (text_mismatch or not replay_match)))
+                    or (validate and (text_mismatch or not xml_reading_match
+                                      or not replay_match or not final_docx_match)))
     except Exception as e:
         print(f"  ERROR {csv_path.name}: {e}", file=sys.stderr)
         return False
@@ -239,12 +273,16 @@ def main() -> None:
         help="Write a JSON sidecar listing editorial review items",
     )
     parser.add_argument(
+        "--original-docx", type=Path,
+        help="Use the original Word document as the starting text for an IDFX session",
+    )
+    parser.add_argument(
         "--replay-html", type=Path,
-        help="Use replay HTML as the starting document and check the reconstructed edits",
+        help="Optionally verify IDFX conversion; requires --original-docx and never supplies conversion input",
     )
     parser.add_argument(
         "--final-docx", type=Path,
-        help="Use a saved final Word document to locate ambiguous one-character Word insertions",
+        help="Check the TEI reading against the saved final Word document and resolve ambiguous one-character insertions",
     )
     parser.add_argument(
         "--overrides", type=Path,
@@ -266,13 +304,20 @@ def main() -> None:
     ):
         parser.error("multiple inputs require an output directory")
     if args.replay_html is not None:
+        if args.original_docx is None:
+            parser.error("--replay-html requires --original-docx; replay HTML is verification only")
         if len(csv_files) != 1 or csv_files[0].suffix.lower() != ".idfx":
             parser.error("--replay-html requires one IDFX input")
         if not args.replay_html.is_file():
             parser.error("--replay-html path does not exist")
+    if args.original_docx is not None:
+        if len(csv_files) != 1 or csv_files[0].suffix.lower() != ".idfx":
+            parser.error("--original-docx requires one IDFX input")
+        if not args.original_docx.is_file():
+            parser.error("--original-docx path does not exist")
     if args.final_docx is not None:
-        if args.replay_html is None:
-            parser.error("--final-docx requires --replay-html")
+        if args.original_docx is None:
+            parser.error("--final-docx requires --original-docx")
         if not args.final_docx.is_file():
             parser.error("--final-docx path does not exist")
 
@@ -299,6 +344,7 @@ def main() -> None:
             args.review_report, overrides_path, args.validate,
             args.replay_html,
             args.final_docx,
+            args.original_docx,
         ):
             ok += 1
         else:

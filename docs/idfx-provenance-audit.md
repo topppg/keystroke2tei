@@ -1,5 +1,9 @@
 # IDFX provenance and editorial audit
 
+The Wordlog 9 replay experiment below is historical. Current conversion uses
+the original DOCX as its baseline and accepts replay HTML only for comparison.
+See [Wordlog 9 command evidence](wordlog9-command-mapping.md).
+
 The KLiCKe WritingTask corpus includes an IDFX log, a CSV log, and a saved
 final `.txt` document for each session. The saved document is an independent
 check on the replayed text; agreement between TEI and replay alone does not

@@ -36,7 +36,7 @@ def _parse_once(
                     if entry.findtext("key") == "__LogProgramVersion"), "")
     major = version.split(".", 1)[0]
     if not major.isdigit() or int(major) < 9:
-        raise ValueError("replay-aware IDFX conversion requires Wordlog 9 or later")
+        raise ValueError("full-document IDFX conversion requires Wordlog 9 or later")
     source = list(root.iter("event"))
 
     # A keyboard event can belong to a Word dialog instead of the document.
@@ -70,7 +70,8 @@ def _parse_once(
     last: dict | None = None
     pending_space: int | None = None
     pending_insert: dict | None = None
-    clipboard = ""
+    clipboard: dict | None = None
+    paired_cuts: set[int] = set()
     paste: dict | None = None
     paste_anchor: dict | None = None
     control = False
@@ -81,7 +82,7 @@ def _parse_once(
 
     def replace_range(
         start: int, end: int, text: str, source_id: int, *, key_output: str | None = None,
-        automatic: bool = False,
+        automatic: bool = False, revision_operation: str = "",
     ) -> None:
         nonlocal next_identity
         start = max(0, min(start, len(document)))
@@ -111,11 +112,16 @@ def _parse_once(
                 position=key_position, doclength=0,
             ))
             return
+        source_event = source_by_id.get(source_id)
         events.append(Event(
             event_type=EventType.REPLACEMENT, event_id=source_id,
             output=f"[{start}:{end}] {text}", char_production=0,
-            action_time=0, start_time=0, end_time=0, pause_location=0,
+            action_time=0,
+            start_time=source_event.start_time if revision_operation and source_event else 0,
+            end_time=source_event.end_time if revision_operation and source_event else 0,
+            pause_location=0,
             pause_location_full="", pause_time=0, position=start, doclength=0,
+            revision_operation=revision_operation,
         ))
 
     def apply_insert(record: dict, length: int) -> None:
@@ -142,7 +148,23 @@ def _parse_once(
             elif left_id in identities:
                 position = identities.index(left_id) + 1
         paste_anchor = None
-        replace_range(position, position, text, record["id"], automatic=True)
+        paste = record["paste"]
+        cut_id = paste.get("cut_id") if paste else None
+        paired = bool(
+            cut_id is not None and not paste["clipboard"]["moved"]
+            and (text == paste["text"] or (text.strip() and text.strip() == paste["text"].strip()))
+            and any(event.event_id == cut_id and event.revision_operation == "cut" for event in events)
+        )
+        before_count = len(events)
+        replace_range(
+            position, position, text,
+            paste["event_id"] if paste else record["id"],
+            automatic=not bool(paste),
+            revision_operation=("paste" if paired else "copy") if paste else "",
+        )
+        if paired and len(events) > before_count:
+            paired_cuts.add(cut_id)
+            paste["clipboard"]["moved"] = True
 
     for element in source:
         kind = element.get("type")
@@ -186,12 +208,20 @@ def _parse_once(
             elif selected and selected[0] <= start <= selected[0] + 1:
                 a, b = selected
                 typed = last["value"] not in ("", "\x08")
+                cut = not typed and last.get("control") and last.get("key") == "VK_X"
+                operation_id = last["id"] if cut else source_id
                 if start == a and (end >= b or (not typed and not new_text)):
-                    replace_range(start, end, new_text if typed else "", source_id)
+                    replace_range(
+                        start, end, new_text if typed else "", operation_id,
+                        revision_operation="cut" if cut else "",
+                    )
                     cursor = start + (len(new_text) if typed else 0)
                 else:
                     q = end if start == a + 1 and not new_text else b
-                    replace_range(a, q, last["value"] if typed else "", source_id)
+                    replace_range(
+                        a, q, last["value"] if typed else "", operation_id,
+                        revision_operation="cut" if cut else "",
+                    )
                     cursor = a + (1 if typed else 0)
                 pending_space = None if typed else cursor
             # Otherwise this is a Word snapshot of selected text, not an edit.
@@ -224,7 +254,10 @@ def _parse_once(
                 replace_range(pending_space, pending_space + 1, "", source_id)
             pending_space = None
         if len(document) != length and key not in _MODIFIERS:
-            warnings.append(f"event {source_id}: document length {length} differs from replay {len(document)}")
+            warnings.append(
+                f"event {source_id}: recorded document length {length} differs from "
+                f"reconstructed document length {len(document)}"
+            )
 
         is_control = key in {"VK_LCONTROL", "VK_RCONTROL", "VK_CONTROL"}
         if not replay and control and key in {"VK_Z", "VK_Y"}:
@@ -232,9 +265,17 @@ def _parse_once(
         if not replay and control and key in {"VK_F", "VK_H"}:
             find_mode = True
         if not replay and control and key in {"VK_C", "VK_X"} and selection[0] != selection[1]:
-            clipboard = "".join(document[selection[0]:selection[1]])
-        if not replay and control and key == "VK_V" and clipboard:
-            paste = {"text": clipboard, "position": position}
+            clipboard = {
+                "text": "".join(document[selection[0]:selection[1]]),
+                "cut_id": source_id if key == "VK_X" else None,
+                "moved": False,
+            }
+        if not replay and control and key == "VK_V" and clipboard and clipboard["text"]:
+            paste = {
+                "text": clipboard["text"], "position": position,
+                "event_id": source_id, "cut_id": clipboard["cut_id"],
+                "clipboard": clipboard,
+            }
             paste_anchor = paste
             pending_insert = {"id": source_id, "position": position, "before": "", "paste": paste}
             last = None
@@ -244,7 +285,8 @@ def _parse_once(
             if key == "VK_OEM_6":
                 dead = True
             selected = selection if selection[0] != selection[1] and selection[0] == position else None
-            last = {"selection": selected, "value": value}
+            last = {"selection": selected, "value": value,
+                    "key": key, "control": control, "id": source_id}
         else:
             last = None
             position = min(position, len(document))
@@ -260,6 +302,10 @@ def _parse_once(
                               key_output="SPACE" if value == " " else value)
                 dead = False
         control = is_control or (control and key in {"VK_LSHIFT", "VK_RSHIFT", "VK_SHIFT"})
+
+    for event in events:
+        if event.revision_operation == "cut" and event.event_id not in paired_cuts:
+            event.revision_operation = ""
 
     return events, metadata, warnings, {
         "final": "".join(document), "identities": identities,
@@ -303,7 +349,19 @@ def parse_idfx_with_initial_text(
     insertions whose IDFX events contain only a cursor and surrounding text.
     """
     events, metadata, warnings, trace = _parse_once(path, initial_text)
-    if final_text is None or not trace["automatic_inserts"]:
+    if final_text is None:
+        unresolved = sum(
+            inserted_id in trace["identities"]
+            for _, inserted_id in trace["automatic_inserts"]
+        )
+        if unresolved:
+            warnings.append(
+                f"{unresolved} surviving one-character Word insertion(s) cannot be "
+                "verified from IDFX and the original document alone; "
+                "provide --final-docx to resolve them"
+            )
+        return events, metadata, warnings
+    if not trace["automatic_inserts"]:
         return events, metadata, warnings
 
     fixes: dict[int, tuple[int | None, str]] = {}
