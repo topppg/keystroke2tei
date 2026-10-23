@@ -49,7 +49,8 @@ CSV parser and older Wordlog 7 IDFX logs normalize recorded post-key positions.
 Wordlog 9 IDFX logs already record pre-key positions and document lengths.
 For IDFX, an OEM key with no recorded character is treated as a non-text key;
 the key name is not inserted into the document. On French layouts, an empty
-`VK_OEM_6` dead key composes with the following vowel. IDFX events marked
+`VK_OEM_6` dead key composes with the following vowel; Backspace cancels a
+pending accent. IDFX events marked
 `replay=False` are represented by their following replacement event; selection
 snapshots are checked against the current text. For a Wordlog 9 session that
 starts with existing text, the original Word document supplies the baseline
@@ -71,8 +72,8 @@ sharing a source event ID. The IDFX files do not record timestamps for
 replacement events. The cursor correction and a sample comparison with saved
 final documents are documented in
 [the IDFX provenance audit](docs/idfx-provenance-audit.md).
-The Wordlog 9 development and held-out replay checks are in
-[the replay audit](docs/wordlog9-replay-audit.md).
+Wordlog 9 command interpretation is documented in
+[the command evidence guide](docs/wordlog9-command-mapping.md).
 
 ## Installation
 
@@ -106,9 +107,11 @@ uv run keystroke2tei data/input/ -o data/output/ -v --stats
 - `-v` prints diagnostics, including cases that need editorial review
 - `--stats` writes a JSON sidecar per file with conversion statistics
 
-For a Wordlog 9 IDFX session that starts with existing text, supply its
-original Word document as the baseline. A saved final Word document can resolve
-single-character Word insertions whose exact position is absent from the IDFX log:
+For a Wordlog 9 IDFX session that starts with existing text, use the IDFX log,
+original Word document, and saved final Word document. The original supplies
+the starting text. The saved final document checks the TEI reading and can
+resolve single-character Word insertions whose exact position is absent from
+the IDFX log:
 
 ```bash
 uv run keystroke2tei session.idfx -o session.tei.xml \
@@ -129,18 +132,11 @@ If no final DOCX is supplied and such an insertion survives, the converter
 warns because the IDFX and original document cannot determine its exact value
 and location. AC_21 has one such insertion.
 
-If an Inputlog replay HTML is available, add `--replay-html replay_session.html`
-alongside `--original-docx` to compare the original DOCX with its starting text
-and the reconstructed document, serialized XML reading text, and edit counts
-with the replay. A mismatch is printed as a warning; `--validate` also makes it
-a conversion error. The replay is optional and never supplies conversion input.
-Because it is generated from the IDFX and Word files, agreement with it is a
-cross-check, not independent evidence for every editorial decision.
 See [Wordlog 9 command evidence](docs/wordlog9-command-mapping.md) for how
 recorded cut, copy, paste, and Word events map to Loxensis notation.
 
 `--classify` makes an optional model call only for editorial revision labels.
-Text reconstruction and replay checks stay deterministic. The classifier sees
+Text reconstruction and DOCX comparisons stay deterministic. The classifier sees
 candidate edits in source-action order with a short snapshot of the document
 immediately before each edit; its labels remain subject to editorial review.
 
